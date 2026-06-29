@@ -1,0 +1,8 @@
+the components:
+DS18B20 digital temperature sensor http://ujeb.se/IPXp
+LCD display (it stays on my window, for me to see it without a need to go to the Internet) http://ujeb.se/9TjU
+Arduino Leonardo - programmable prototype board, which is the heart of the whole thing http://ujeb.se/xLqq
+Ethernet module enc28j60 http://ujeb.se/YTtM
+Router TP-LINK WR1043ND v2 with alternative software installed, OpenWRT http://ujeb.se/RNrL
+
+sudo echo "T$(($(date +%s)+2*60*60))" >/dev/ttyACM0
