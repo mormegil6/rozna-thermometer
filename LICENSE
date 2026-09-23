@@ -23,3 +23,7 @@ SOFTWARE.
 The Arduino libraries this firmware builds against (EtherCard, OneWire,
 DallasTemperature, Time, LiquidCrystal, Adafruit SleepyDog) are not included in
 this repository and remain under their own licenses.
+
+The enclosure's brightness and contrast icons are adapted from Flaticon
+(Brightness icon by Freepik, Contrast icon by Smartline, free.flaticon.com),
+used under Flaticon's free license and not covered by the license above.

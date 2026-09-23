@@ -101,6 +101,19 @@ can knock the ENC's SPI or power loose (this happened repeatedly during bring-up
 For a permanent install, solder or use locking connectors on the ENC's SPI, power
 and RST lines.
 
+### Enclosure
+
+A 3D-printed enclosure, designed by Daniel Wiśniewski, a colleague from the
+Department of Multimedia Systems, houses the board and brings the LCD, contrast
+pot and brightness pot to the front panel. The two potentiometers are labelled
+with brightness and contrast icons adapted from Flaticon (see [License](#license)
+for credit). Design files are in [`enclosure/`](enclosure/): the full assembly
+([`Termo_ass.step`](enclosure/Termo_ass.step)) and the two printable parts
+([`Termo_box.stl`](enclosure/Termo_box.stl), [`Termo_lid.stl`](enclosure/Termo_lid.stl)).
+A live, editable version is also on
+[Fusion 360](https://mypg468.autodesk360.com/g/shares/SH28cd1QT2badd0ea72b3ebdcf2fd0c9138a).
+Photos to follow in `docs/`.
+
 ## How it works
 
 ### Web UI and API
@@ -306,7 +319,11 @@ README.md  LICENSE  .gitignore
 ## License
 
 MIT. See [LICENSE](LICENSE). The Arduino libraries this builds against are not
-included and remain under their own licenses.
+included and remain under their own licenses. The enclosure's brightness and
+contrast icons are adapted from Flaticon: [Brightness icon](https://www.flaticon.com/free-icon/brightness_466300)
+by Freepik, [Contrast icon](https://www.flaticon.com/free-icon/contrast_475980)
+by Smartline, used under Flaticon's free license and not covered by the MIT
+license above.
 
 ## Contact
 
