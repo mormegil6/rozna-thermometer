@@ -59,14 +59,30 @@ Raspberry Pi).
 
 | Signal | Leonardo pin | Notes |
 |---|---|---|
-| LCD RS / E | D7 / D6 | `LiquidCrystal lcd(7,6,5,4,3,2)` |
-| LCD D4 / D5 / D6 / D7 | D5 / D4 / D3 / D2 | LCD RW to GND |
-| LCD V0 | pot wiper | contrast (pot ends to 5V and GND) |
+| LCD | see LCD pin map below | 16x2 HD44780, 4-bit mode, `LiquidCrystal lcd(7,6,5,4,3,2)` |
 | DS18B20 DATA | D10 | 4.7 kOhm pull-up DATA to 5V, required |
 | ENC28J60 SPI (MISO/MOSI/SCK) | ICSP header | not pins 11/12/13 on a Leonardo |
 | ENC28J60 CS | D8 | see "CS gotcha" below |
 | ENC28J60 RST | D9 | required, see "RST gotcha" below |
 | ENC28J60 VCC / GND | 3.3V (or 5V if the module has a regulator) / GND | |
+
+### LCD pin map
+
+| LCD signal | LCD header pin | Connects to | Notes |
+|---|---|---|---|
+| VSS | 1 | GND | |
+| VDD | 2 | +5V | |
+| V0 | 3 | contrast pot wiper | pot ends to 5V and GND |
+| RS | 4 | Leonardo D7 | |
+| RW | 5 | GND | not driven by the firmware, tied low |
+| E | 6 | Leonardo D6 | |
+| D0-D3 | 7-10 | not connected | 4-bit mode |
+| D4 | 11 | Leonardo D5 | |
+| D5 | 12 | Leonardo D4 | |
+| D6 | 13 | Leonardo D3 | |
+| D7 | 14 | Leonardo D2 | |
+| A | 15 | +5V (through ~220R if the module has no onboard resistor) | backlight |
+| K | 16 | GND | backlight |
 
 **CS gotcha.** EtherCard's `begin()` default chip-select drifted from pin 8 (old)
 to `SS`, which is pin 17 on the Leonardo (current library). The 2015 sketch relied
