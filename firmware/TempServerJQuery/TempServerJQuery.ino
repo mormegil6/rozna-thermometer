@@ -49,7 +49,7 @@
 
 // ----------------------------- configuration -----------------------------
 #define ETH_ENABLED     1           // set 0 to run as a pure thermometer (no NIC access at all)
-#define USE_NTP         1           // set 0 to skip NTP/DNS entirely (LCD shows uptime; web never stalls)
+#define USE_NTP         1           // set 0 to skip NTP entirely (LCD shows uptime; web never stalls)
 #define DEBUG           0           // 1 = print a 3 s Serial heartbeat; 0 = quiet + leaner for deployment
 #define CS_PIN          8           // ENC28J60 chip-select (NOT the SS default!)
 #define ETH_RST_PIN     9           // ENC28J60 RST (active-low) -> wire to D9. Comment out if unwired.
@@ -65,11 +65,14 @@ static byte mask[]  = { 255, 255, 255, 0 };
 // Time zone for the LCD clock. Poland/CET: winter (CET)=+1h, summer (CEST)=+2h.
 // No automatic DST — set this for the season you deploy in.
 #define UTC_OFFSET_SEC  (2L * 3600L)        // CEST (summer). Use 1*3600 for winter.
-const char NTP_HOST[] PROGMEM = "pool.ntp.org";
+// Fixed NTP server IP (Google Public NTP), not a hostname: ether.dnsLookup()
+// can block for ~30 s with the watchdog paused if a query never gets a reply,
+// freezing the LCD along with everything else. Skipping DNS entirely removes
+// that risk; the actual time request below is already non-blocking.
+static const byte NTP_SERVER_IP[] = { 216, 239, 35, 4 };
 #define NTP_SRCPORT     0x42
 #define NTP_SYNC_MS     3600000UL           // resync once an hour after first success
 #define NTP_RETRY_MS    20000UL             // retry this often until first success
-#define NTP_MAX_DNS_FAILS 5                 // give up on NTP after this many DNS failures (stops the stalls)
 #define ETH_REINIT_MS   30000UL             // re-init ENC28J60 if link is down this long
 #define ETH_RETRY_MS    15000UL             // when offline, re-probe + bring up the NIC this often
 #define LINK_CHECK_MS   2000UL              // how often to read PHY link status
@@ -102,7 +105,6 @@ static uint8_t  ntpServerIp[IP_LEN];
 static bool     haveNtpServer = false;
 static bool     timeSynced    = false;
 static uint32_t lastNtpReq    = 0;
-static uint32_t lastDnsTry    = 0;
 static uint32_t lastLinkUp    = 0;
 static uint32_t lastLcd       = 0;
 #if DEBUG
@@ -112,7 +114,6 @@ static uint32_t lastEthTry    = 0;
 static uint32_t lastLinkChk   = 0;
 static bool     ethReady      = false;   // true only when ether.begin() has succeeded
 static bool     linkUp        = false;   // cached PHY link state (updated on a timer)
-static uint8_t  dnsFails      = 0;        // consecutive NTP DNS failures (for backoff/give-up)
 float celsius, fahrenheit;
 static bool     haveReading   = false;   // true once we have a valid reading
 static bool     converting    = false;   // an async DS18B20 conversion is in progress
@@ -221,41 +222,24 @@ static bool bringUpEthernet() {
   }
   ether.staticSetup(myip, gwip, dnsip, mask);
   ether.printIp(F("IP: "), ether.myip);
-  haveNtpServer = false;          // must re-resolve the NTP host after a (re)init
+  haveNtpServer = false;          // re-adopt the fixed NTP server IP after a (re)init
   lastLinkUp = millis();
   Serial.println(F("Ethernet UP"));
   return true;
 #endif
 }
 
-// Called every loop. Only touches the network when the link is actually up,
-// so the blocking dnsLookup is bounded (returns in <1 s with a link). The
-// watchdog is paused only around that one blocking call.
+// Called every loop. Never blocks: the NTP server is a fixed IP (see
+// NTP_SERVER_IP above), so there is no DNS lookup here to stall on, and
+// ether.ntpRequest() below is itself non-blocking.
 static void serviceTime() {
 #if USE_NTP
-  // Resolve the NTP server only while the link is up (use the CACHED state — never
-  // call the hang-prone isLinkUp() here). dnsLookup() blocks ~30 s on failure and
-  // starves the whole loop (LCD + web), so we back off hard and then GIVE UP, which
-  // stops the stalls entirely; the LCD just falls back to uptime.
-  if (linkUp && !haveNtpServer && dnsFails < NTP_MAX_DNS_FAILS) {
-    uint32_t dnsInterval = (dnsFails < 2) ? NTP_RETRY_MS : 300000UL;   // 20 s, then 5 min
-    if (lastDnsTry == 0 || millis() - lastDnsTry > dnsInterval) {
-      lastDnsTry = millis();
-      Watchdog.disable();
-      bool ok = ether.dnsLookup(NTP_HOST);
-      Watchdog.enable(WDT_MS);
-      if (ok) {
-        ether.copyIp(ntpServerIp, ether.hisip);
-        haveNtpServer = true;
-        dnsFails = 0;
-        lastNtpReq = 0;             // ask for time promptly
-        ether.printIp(F("NTP: "), ntpServerIp);
-      } else {
-        dnsFails++;
-        Serial.print(F("NTP DNS failed ")); Serial.print(dnsFails);
-        Serial.println(dnsFails >= NTP_MAX_DNS_FAILS ? F(" - giving up (uptime mode)") : F(" - backing off"));
-      }
-    }
+  // Adopt the fixed server IP once the link is up (use the CACHED state —
+  // never call the hang-prone isLinkUp() here).
+  if (linkUp && !haveNtpServer) {
+    ether.copyIp(ntpServerIp, NTP_SERVER_IP);
+    haveNtpServer = true;
+    ether.printIp(F("NTP: "), ntpServerIp);
   }
 
   if (haveNtpServer) {
