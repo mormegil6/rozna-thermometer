@@ -127,8 +127,12 @@ architecture, preserved.
 - `GET /` serves the HTML shell (header "Rožna Arduino Thermometer", inset
   listview, footer).
 - `GET /main.css`, `GET /main.js`, `GET /det.js` are served from PROGMEM.
-- `GET /list.json` returns `{"list":[{"id","name","val","ifnegative"}],"uptime","free","res","pin","ntp","now"}`,
-  where `val` is degrees C times 100 (the JS divides by 100). The footer shows the
+- `GET /list.json` returns `{"list":[{"id","name","val","ifnegative"}],"uptime","free","res","pin","ntp","now","rst","why","dbg"}`,
+  where `val` is degrees C times 100 (the JS divides by 100), `now` is local time,
+  `rst` counts self-restarts since power-up, `why` is the reason code of the last
+  self-restart (0 none, 1 no link, 2 no gateway ARP reply, 3 NIC re-init after
+  traffic, 4 chip registers changed) and `dbg` is the chip snapshot taken just
+  before it (see Resilience). The footer shows the
   "Assembled by Bartłomiej Mróz" credit, uptime, and memory use (RAM and flash both
   as used / total, matching the Arduino IDE).
 - Tapping a sensor row slides open an inline detail panel (and rotates the row's
@@ -144,10 +148,13 @@ version (`ASSET_VER`), so changes reach the browser without a manual cache clear
 ### NTP clock
 
 Replaces the original serial time-sync, which froze the board at boot waiting for a
-PC. `serviceTime()` resolves `pool.ntp.org` over DNS (via the router), sends an NTP
-request, and the answer sets the Time library clock. It re-syncs hourly. If DNS
-keeps failing it backs off and gives up so it can never stall the loop, and the LCD
-falls back to uptime. There is no automatic DST; set `UTC_OFFSET_SEC` for the season.
+PC. `serviceTime()` sends an NTP request to a fixed server IP (Google Public NTP,
+`NTP_SERVER_IP`) rather than a hostname: `ether.dnsLookup()` can block for about 30 s
+when a query gets no reply, and that froze the whole loop, LCD included. The answer
+sets the Time library clock, which holds UTC. `localNow()` adds the Polish offset
+(CET, plus EU summer time from 01:00 UTC on the last Sunday of March to 01:00 UTC on
+the last Sunday of October) for the LCD and the JSON `now`. It re-syncs hourly, and
+until the first answer the LCD shows uptime.
 
 ### Performance
 
@@ -168,6 +175,36 @@ falls back to uptime. There is no automatic DST; set `UTC_OFFSET_SEC` for the se
   an unresponsive chip, so it is never called unless the chip answers and its
   oscillator is running. A missing or dead NIC drops to OFFLINE: the LCD and sensor
   keep working and the firmware retries the NIC every 15 s.
+- The NIC is never re-initialised in place once it may have received a frame.
+  EtherCard keeps its receive pointers in function-local statics that
+  `ether.begin()` cannot reset, so an in-place re-init leaves the receive path out of
+  step with the chip: the board still transmits but never answers ARP or ping. A lost
+  link is simply waited out (the receive ring is untouched), and if the chip does not
+  resume when the link returns, the ladder below restarts the MCU.
+- Recovery ladder. With the link up the board sends an ARP request to the gateway
+  every 30 s, and only the gateway's reply counts as proof of life: it needs a short
+  frame to leave the board and a reply to come back, whereas any received frame would
+  hide a chip that receives but cannot send. The MCU restarts with a watchdog reset
+  (about 5 s, which also clears the EtherCard pointers) after 5 min without a reply,
+  10 min with the link down after it was up, a NIC fault after traffic, or the chip's
+  key registers (ECON1.RXEN, MACON1, MACON3, ERXFCON, the MAC address) changing on two
+  checks 10 s apart. Consecutive restarts stretch the windows up to 16 times, and 30
+  min of healthy uptime forgets them. The clock survives a restart. `gwip` must
+  answer ARP, otherwise a bench board with no gateway restarts at 5, 10, 20, 40 and
+  then every 80 min.
+- Evidence for the next failure. Before a self-restart the chip's registers are read
+  (ECON1 ESTAT EIR MACON1 MACON3 ERXFCON, a mask of wrong MAC bytes, and a spare
+  byte), printed on Serial, kept in RAM across the restart and served as `why` and
+  `dbg` in `/list.json`. The read restores ECON1.BSEL, so EtherCard's cached register
+  bank stays valid. At every boot Serial shows `Chip audit OK` when those registers
+  match what EtherCard configured, or `Chip audit BAD` with the bytes.
+- LCD status cells, both blank when all is well: row 0 column 8 shows recent
+  self-restarts (`+` above 9) and clears itself after 30 min of healthy uptime, row 1
+  column 8 is `O` for NIC offline, `L` for no link and `S` for link up but no
+  gateway ARP reply for 90 s. The lifetime restart count is `rst` in `/list.json`.
+- The DS18B20 can be plugged in at any time. DallasTemperature only counts devices in
+  `begin()`, so a probe attached after boot used to stay invisible; while none is
+  known the sketch checks the bus every 3 s and re-runs `begin()` when one appears.
 - SleepyDog watchdog (8 s), safe on the 32u4 bootloader.
 - Temperature and LCD are fully decoupled from the network, so the monitor always
   works.
@@ -234,7 +271,8 @@ AV=~/Library/Arduino15/packages/arduino/tools/avrdude/8.0.0-arduino1
 | `ONE_WIRE_BUS` | `10` | DS18B20 data pin |
 | `mymac` | `02:52:6F:7A:6E:61` | locally-administered MAC |
 | `myip` / `gwip` / `dnsip` / `mask` | `192.168.1.200` / `.1` / `.1` / `/24` | office network |
-| `UTC_OFFSET_SEC` | `2*3600` | CEST (summer); use `1*3600` for CET (winter) |
+| `UTC_STD_OFFSET_SEC` | `1*3600` | CET (winter) offset; EU summer time is added automatically |
+| `PROBE_MS` / `AUDIT_MS` / `SILENT_RESTART_MS` / `LINK_DOWN_RESTART_MS` | 30 s / 10 s / 5 min / 10 min | gateway ARP probe and chip register check intervals, then MCU restart when the gateway never replies or the link is lost |
 | `ASSET_VER` | `"6"` | cache-bust version; bump when main.css/main.js/det.js change |
 | `FOOTER_LOGO_URL` | ImgBB link | footer logo image |
 
@@ -278,7 +316,11 @@ unchanged. The changes fall into three buckets.
 - An SPI plus CLKRDY probe before `ether.begin()`, so a missing, dead or
   half-connected NIC can never hang the board; it degrades to OFFLINE and retries.
 - SleepyDog watchdog (safe on the 32u4).
-- DNS backoff and give-up so a failing NTP lookup can never stall the LCD or web.
+- A fixed NTP server IP instead of a DNS lookup, because a blocking lookup froze the
+  whole loop, LCD included, whenever a query got no answer.
+- No in-place NIC re-init after traffic (EtherCard cannot resynchronise its receive
+  pointers), and a restart ladder for a dead receive path (see Resilience).
+- Automatic EU summer time for the LCD clock.
 - Temperature and LCD decoupled from Ethernet; a Serial heartbeat for observability.
 - Async sensor reads, browser-cached static assets with cache-busting, integer
   formatting, 11-bit DS18B20, and the expandable per-sensor detail panel.
@@ -291,7 +333,19 @@ unchanged. The changes fall into three buckets.
   the module (about 3 USD); the firmware and EtherCard code are unchanged either way.
 - Latency is jittery (it is a slow 10 Mbps chip on breadboard wiring) but lossless
   once connected.
-- No automatic DST; set `UTC_OFFSET_SEC` per season.
+- Field failure seen on 2026-09-25, cause not yet proven: LCD, clock and link LEDs
+  fine, but the board answered ping (with a static ARP entry) and never answered ARP
+  or completed a TCP handshake, from wired and Wi-Fi clients alike. Every frame the
+  firmware sends with an explicit short length (the 42 byte ARP reply, the SYN-ACK)
+  was lost, while echo replies, which copy the incoming length, were fine. The
+  suspect is the chip no longer padding short frames (MACON3), so the router drops
+  them; a power cycle fixed the same symptom the day before. The gateway ARP round
+  trip now detects it and the register snapshot should show which register changed.
+- EtherCard 1.1.0 cannot be re-initialised in place after it has received a frame
+  (`packetReceive()` keeps private static pointers that `ether.begin()` does not
+  reset). Do not call `ether.begin()` again from your own code once traffic has
+  flowed; the firmware restarts the MCU instead. Confirmed in the source and a
+  simulation, not yet on hardware.
 - A static-IP ENC28J60 takes no DHCP lease, so it will not appear in the router's
   device list. Verify with `ping`, not the router UI.
 

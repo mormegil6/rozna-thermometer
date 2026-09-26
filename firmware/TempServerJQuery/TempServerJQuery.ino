@@ -46,6 +46,7 @@
 #include <LiquidCrystal.h>
 #include <TimeLib.h>
 #include <Adafruit_SleepyDog.h>
+#include <avr/wdt.h>
 
 // ----------------------------- configuration -----------------------------
 #define ETH_ENABLED     1           // set 0 to run as a pure thermometer (no NIC access at all)
@@ -62,9 +63,8 @@ static byte gwip[]  = { 192, 168, 1, 1 };
 static byte dnsip[] = { 192, 168, 1, 1 };   // router usually serves DNS; use 8.8.8.8 if not
 static byte mask[]  = { 255, 255, 255, 0 };
 
-// Time zone for the LCD clock. Poland/CET: winter (CET)=+1h, summer (CEST)=+2h.
-// No automatic DST — set this for the season you deploy in.
-#define UTC_OFFSET_SEC  (2L * 3600L)        // CEST (summer). Use 1*3600 for winter.
+// LCD clock zone: standard (winter) offset, Poland/CET = +1 h. EU summer time is added in localNow().
+#define UTC_STD_OFFSET_SEC  (1L * 3600L)
 // Fixed NTP server IP (Google Public NTP), not a hostname: ether.dnsLookup()
 // can block for ~30 s with the watchdog paused if a query never gets a reply,
 // freezing the LCD along with everything else. Skipping DNS entirely removes
@@ -73,13 +73,21 @@ static const byte NTP_SERVER_IP[] = { 216, 239, 35, 4 };
 #define NTP_SRCPORT     0x42
 #define NTP_SYNC_MS     3600000UL           // resync once an hour after first success
 #define NTP_RETRY_MS    20000UL             // retry this often until first success
-#define ETH_REINIT_MS   30000UL             // re-init ENC28J60 if link is down this long
+#define ETH_REINIT_MS   30000UL             // link never came up this long: re-init in place
 #define ETH_RETRY_MS    15000UL             // when offline, re-probe + bring up the NIC this often
 #define LINK_CHECK_MS   2000UL              // how often to read PHY link status
+#define PROBE_MS        30000UL             // link up: ARP the gateway this often
+#define AUDIT_MS        10000UL             // read the chip's key registers this often once the boot audit passed
+#define SILENT_RESTART_MS 300000UL          // link up and no gateway ARP reply this long: restart the MCU
+#define LINK_DOWN_RESTART_MS 600000UL       // link down this long after it was up: restart the MCU
+#define BACKOFF_MAX     4                   // consecutive restarts double the windows, up to 16x
+#define STREAK_CLEAR_MS 1800000UL           // this much healthy uptime forgets earlier restarts
+#define MIN_UPTIME_MS   60000UL             // minimum uptime before a NIC-fault restart
 #define WDT_MS          8000                // SleepyDog window (AVR max ~8s)
 #define LCD_REFRESH_MS  500                 // repaint ~2x/s so the seconds clock never skips
 #define SENSOR_RES      11                  // DS18B20 resolution bits 9..12 (11 = 0.125 C, ~375 ms)
 #define SENSOR_INTERVAL_MS 1500             // start a new (async) conversion this often
+#define SENSOR_RESCAN_MS 3000UL             // no probe known: look for a newly plugged one this often
 #define CONV_DELAY_MS   ((750 >> (12 - SENSOR_RES)) + 40)   // wait for conversion before reading
 #define NTP_EPOCH_1900  2208988800UL        // seconds between 1900 and 1970
 
@@ -112,6 +120,13 @@ static uint32_t lastStatus    = 0;
 #endif
 static uint32_t lastEthTry    = 0;
 static uint32_t lastLinkChk   = 0;
+static uint32_t lastAck       = 0;       // last ARP reply from the gateway, or last link DOWN to UP edge
+static uint32_t lastProbe     = 0;
+static bool     probeMiss     = false;   // a probe went unanswered (noted once on Serial)
+static bool     auditOk       = false;   // the boot audit passed, so a later mismatch is drift, not a misread
+static uint8_t  auditBad      = 0;       // consecutive periodic audits that failed
+static uint32_t lastAudit     = 0;
+static bool     rxSeen        = false;   // link came up or a frame was read: never re-init the chip in place
 static bool     ethReady      = false;   // true only when ether.begin() has succeeded
 static bool     linkUp        = false;   // cached PHY link state (updated on a timer)
 float celsius, fahrenheit;
@@ -119,8 +134,60 @@ static bool     haveReading   = false;   // true once we have a valid reading
 static bool     converting    = false;   // an async DS18B20 conversion is in progress
 static uint32_t convStart     = 0;
 static uint32_t lastConvReq   = 0;
+static uint32_t lastRescan    = 0;
+
+// Survive a watchdog restart (.noinit is neither cleared nor initialised at startup).
+#define NV_MAGIC 0xB007
+static uint16_t nvMagic  __attribute__((section(".noinit")));   // NV_MAGIC after restartMcu() only
+static uint8_t  nvStreak __attribute__((section(".noinit")));   // consecutive self-restarts
+static uint8_t  nvTotal  __attribute__((section(".noinit")));   // self-restarts since power-up (JSON, Serial)
+static uint32_t nvTime   __attribute__((section(".noinit")));   // UTC clock across a restart, 0 = none
+static uint8_t  nvWhy    __attribute__((section(".noinit")));   // reason code of the last self-restart, 0 = none
+static uint8_t  nvDbg[8] __attribute__((section(".noinit")));   // chip snapshot taken just before it
 
 // ------------------------------- helpers ---------------------------------
+// Caterina already clears MCUSR and stops the watchdog; this covers a bootloader that does not.
+void wdtEarlyOff() __attribute__((naked, used, section(".init3")));
+void wdtEarlyOff() { MCUSR = 0; wdt_disable(); }
+
+static void encSnapshot(uint8_t out[8]);
+
+// Chip snapshot bytes: ECON1 ESTAT EIR MACON1 MACON3 ERXFCON MAC-mismatch-mask 0.
+static void printBytes(const uint8_t *p) {
+  for (uint8_t i = 0; i < 8; i++) { Serial.write(' '); if (p[i] < 16) Serial.write('0'); Serial.print(p[i], HEX); }
+  Serial.println();
+}
+
+static void printWhy() {
+  Serial.print(F(", why=")); Serial.print(nvWhy); Serial.print(F(", chip:"));
+  printBytes(nvDbg);
+}
+
+// The only way to reset EtherCard's private RX pointers (function-local statics in packetReceive()).
+static void restartMcu(const __FlashStringHelper *why, uint8_t code) __attribute__((noreturn));
+static void restartMcu(const __FlashStringHelper *why, uint8_t code) {
+  nvWhy = code;
+  encSnapshot(nvDbg);
+  Serial.print(F("Restarting MCU: "));
+  Serial.print(why);
+  printWhy();
+  Serial.flush();                            // cli() below stops the 1 ms USB flush, so hand the FIFO over now
+  nvTime = (timeStatus() == timeNotSet) ? 0 : (uint32_t)now();
+  cli();
+  if (nvStreak < 200) nvStreak++;
+  if (nvTotal < 250) nvTotal++;
+  nvMagic = NV_MAGIC;
+  *(volatile uint16_t *)0x0800 = 0;          // boot key 0x7777 would hold Caterina for 8 s
+  *(volatile uint16_t *)(RAMEND - 1) = 0;    // same key at the newer bootloader location
+  wdt_enable(WDTO_15MS);
+  for (;;) {}
+}
+
+// Shift that lengthens every restart window after consecutive self-restarts, so a restart loop slows down.
+static uint8_t backoff() {
+  return nvStreak > BACKOFF_MAX ? BACKOFF_MAX : nvStreak;
+}
+
 static int freeRam() {
   extern int __heap_start, *__brkval;
   int v;
@@ -196,21 +263,80 @@ static bool enc28j60Responds() {
 static bool enc28j60Healthy() {
   uint8_t spcr = SPCR, spsr = SPSR;
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-  bool ok = (encScratch(0xAB) == 0xAB) && (encScratch(0x54) == 0x54);
+  uint8_t e1 = encReadReg(0x1F);                          // ECON1 (same in every bank)
   uint8_t es = encReadReg(0x1D);                          // ESTAT
+  // Register 0x02 is MACON3 or MAADR3 in banks 2 and 3 (isLinkUp() leaves bank 2): do not write it there.
+  bool ok = (e1 & 0x03) > 1 || ((encScratch(0xAB) == 0xAB) && (encScratch(0x54) == 0x54));
   SPI.endTransaction();
   SPCR = spcr;                                            // restore EtherCard's SPI config
   SPSR = (SPSR & ~_BV(SPI2X)) | (spsr & _BV(SPI2X));
-  return ok && (es != 0xFF) && (es & 0x01);              // SPI ok AND oscillator running
+  return ok && (es != 0xFF) && (es & 0x01) && (e1 & 0x04);   // SPI ok, oscillator running, RXEN still set
+}
+
+// ECON1.BSEL only: EtherCard caches the selected bank and never re-reads it.
+static void encBsel(uint8_t bank) {
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0xA0 | 0x1F);            // BFC ECON1
+  SPI.transfer(0x03);
+  digitalWrite(CS_PIN, HIGH);
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0x80 | 0x1F);            // BFS ECON1
+  SPI.transfer(bank & 0x03);
+  digitalWrite(CS_PIN, HIGH);
+}
+
+// reg is the driver's id (addr | bank << 5 | 0x80 for MAC/MII); the caller holds the SPI transaction.
+static uint8_t encReadBanked(uint8_t reg) {
+  uint8_t bsel = encReadReg(0x1F) & 0x03;
+  encBsel(reg >> 5);
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(reg & 0x1F);
+  if (reg & 0x80) SPI.transfer(0x00);   // MAC and MII registers return a dummy byte first
+  uint8_t v = SPI.transfer(0x00);
+  digitalWrite(CS_PIN, HIGH);
+  encBsel(bsel);
+  if ((encReadReg(0x1F) & 0x03) != bsel) encBsel(bsel);
+  return v;
+}
+
+// ESTAT reads 0xFF only when no chip answers; then every byte is 0xFF.
+static void encSnapshot(uint8_t out[8]) {
+  // MACON1 MACON3 ERXFCON, then MAADR5..0 which hold mymac[0..5]
+  static const uint8_t REGS[] PROGMEM = { 0xC0, 0xC2, 0x38, 0xE4, 0xE5, 0xE2, 0xE3, 0xE0, 0xE1 };
+  uint8_t spcr = SPCR, spsr = SPSR;
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  out[0] = encReadReg(0x1F);
+  out[1] = encReadReg(0x1D);
+  out[2] = encReadReg(0x1C);
+  if (out[1] == 0xFF) {
+    memset(out, 0xFF, 8);
+  } else {
+    out[6] = out[7] = 0;
+    for (uint8_t i = 0; i < 9; i++) {
+      uint8_t v = encReadBanked(pgm_read_byte(REGS + i));
+      if (i < 3) out[3 + i] = v;
+      else if (v != mymac[i - 3]) out[6] |= 1 << (i - 3);
+    }
+  }
+  SPI.endTransaction();
+  SPCR = spcr;                          // restore EtherCard's SPI config
+  SPSR = (SPSR & ~_BV(SPI2X)) | (spsr & _BV(SPI2X));
+}
+
+// What EtherCard's initialize() leaves in the chip: RXEN, MACON1, MACON3, ERXFCON, and every MAC byte right.
+static bool chipGood(const uint8_t *s) {
+  return (s[0] & 0x04) && s[3] == 0x01 && s[4] == 0x32 && s[5] == 0xB1 && s[6] == 0;
 }
 
 // Probe -> hardware reset -> ether.begin -> static IP. Returns true only if the
 // chip is present and begin() succeeds. Safe to call from setup() or loop():
 // it can't hang, because we never call ether.begin() on an unresponsive chip.
+// Once rxSeen is set it restarts the MCU instead of re-initialising in place.
 static bool bringUpEthernet() {
 #if !ETH_ENABLED
   return false;                      // Ethernet disabled at compile time
 #else
+  if (rxSeen) restartMcu(F("NIC re-init after traffic"), 3);
   hardResetEthernet();
   if (!enc28j60Responds()) {
     Serial.println(F("ENC28J60 not responding on SPI -> OFFLINE (LCD only)"));
@@ -227,6 +353,35 @@ static bool bringUpEthernet() {
   Serial.println(F("Ethernet UP"));
   return true;
 #endif
+}
+
+// Hand-built ARP who-has for the gateway: EtherCard's LAN ping may use a MAC it never learned.
+static const uint8_t ARP_REQ_HDR[] PROGMEM = { 0, 1, 8, 0, 6, 4, 0, 1 };   // Ethernet, IPv4, 6, 4, request
+static void probeGateway() {
+  uint8_t *b = Ethernet::buffer;
+  memset(b + ETH_DST_MAC, 0xFF, ETH_LEN);
+  memcpy(b + ETH_SRC_MAC, mymac, ETH_LEN);
+  b[ETH_TYPE_H_P] = ETHTYPE_ARP_H_V;
+  b[ETH_TYPE_H_P + 1] = ETHTYPE_ARP_L_V;
+  memcpy_P(b + ETH_ARP_P, ARP_REQ_HDR, sizeof ARP_REQ_HDR);
+  memcpy(b + ETH_ARP_SRC_MAC_P, mymac, ETH_LEN);
+  memcpy(b + ETH_ARP_SRC_IP_P, myip, IP_LEN);
+  memset(b + ETH_ARP_DST_MAC_P, 0, ETH_LEN);
+  memcpy(b + ETH_ARP_DST_IP_P, gwip, IP_LEN);
+  ether.packetSend(42);
+}
+
+// Only this reply proves a short frame got out; long NTP answers would mask that.
+static bool isGatewayArpReply(const uint8_t *b, uint16_t len) {
+  return len >= 42 && b[ETH_TYPE_H_P] == ETHTYPE_ARP_H_V && b[ETH_TYPE_H_P + 1] == ETHTYPE_ARP_L_V &&
+         b[ETH_ARP_OPCODE_L_P] == ETH_ARP_OPCODE_REPLY_L_V &&
+         memcmp(b + ETH_ARP_SRC_IP_P, gwip, IP_LEN) == 0 && memcmp(b + ETH_ARP_DST_IP_P, myip, IP_LEN) == 0;
+}
+
+// Grace after link-up or bring-up: the first probe leaves 5 s from now.
+static void armProbe() {
+  lastAck = millis();
+  lastProbe = lastAck - PROBE_MS + 5000UL;
 }
 
 // Called every loop. Never blocks: the NTP server is a fixed IP (see
@@ -276,6 +431,19 @@ static void lcdTempField(float t, uint8_t width) {
 // ~CONV_DELAY_MS later. waitForConversion is false (set in setup), so this never
 // stalls the loop (the old code blocked ~750 ms here AND again in /list.json).
 static void serviceSensor() {
+  // DallasTemperature counts devices only in begin(), so a probe plugged in after boot is
+  // invisible to getTempCByIndex(). begin() sleeps 150 ms with nothing attached: probe first.
+  if (!converting && sensors.getDeviceCount() == 0 && millis() - lastRescan > SENSOR_RESCAN_MS) {
+    lastRescan = millis();
+    uint8_t rom[8];
+    oneWire.reset_search();
+    if (oneWire.search(rom) && OneWire::crc8(rom, 7) == rom[7]) {
+      sensors.begin();
+      DeviceAddress a;
+      // A fresh probe is 12-bit; setResolution() writes its EEPROM, so only when it differs.
+      if (sensors.getAddress(a, 0) && sensors.getResolution(a) != SENSOR_RES) sensors.setResolution(SENSOR_RES);
+    }
+  }
   if (!converting && (lastConvReq == 0 || millis() - lastConvReq > SENSOR_INTERVAL_MS)) {
     sensors.requestTemperatures();        // returns immediately (async)
     converting = true;
@@ -293,15 +461,39 @@ static void serviceSensor() {
   }
 }
 
+// EU summer time: 01:00 UTC on the last Sunday of March until 01:00 UTC on the last Sunday of October.
+static time_t localNow() {
+  time_t u = now();
+  uint8_t m = month(u), d = day(u), w = weekday(u);
+  bool past = d - w >= 24 && (w > 1 || hour(u));   // last Sunday 01:00 UTC reached (weekday 1 = Sunday)
+  if ((m > 3 && m < 10) || (m == 3 ? past : m == 10 && !past)) u += 3600L;
+  return u + UTC_STD_OFFSET_SEC;
+}
+
+// One LCD cell of network state: O = NIC offline, L = no link, S = link up but no gateway ARP reply for 90 s, blank = fine.
+static char netChar() {
+#if !ETH_ENABLED
+  return ' ';
+#else
+  if (!ethReady) return 'O';
+  if (!linkUp) return 'L';
+  return (millis() - lastAck > 3 * PROBE_MS) ? 'S' : ' ';
+#endif
+}
+
 // Repaint the LCD from the CACHED reading, writing fixed-width fields IN PLACE
 // (no lcd.clear(), so no flicker). 16x2 layout, each field a constant width:
-//   row0: "TTTTT" C  "HH:MM:SS"     row1: "TTTTT" F  "DD.MM.YY"   (TTTTT = 5 cells)
+//   row0: "TTTTT" C r "HH:MM:SS"    row1: "TTTTT" F n "DD.MM.YY"   (TTTTT = 5 cells)
+// r = recent self-restarts (1-9, + for more; blank when healthy); n = netChar(), blank when fine.
 static void updateLcd() {
+  time_t t = localNow();
+  bool haveClock = timeStatus() != timeNotSet;              // NTP, or carried across a self-restart
   lcd.setCursor(0, 0);
   if (haveReading) lcdTempField(celsius, 5); else lcd.print(F(" --.-"));
-  lcd.write((uint8_t)223); lcd.write('C'); lcd.write(' ');   // degree glyph + unit
-  if (timeSynced) {
-    lcdDigits(hour()); lcd.write(':'); lcdDigits(minute()); lcd.write(':'); lcdDigits(second());
+  lcd.write((uint8_t)223); lcd.write('C');                  // degree glyph + unit
+  lcd.write((uint8_t)(nvStreak == 0 ? ' ' : nvStreak < 10 ? '0' + nvStreak : '+'));
+  if (haveClock) {
+    lcdDigits(hour(t)); lcd.write(':'); lcdDigits(minute(t)); lcd.write(':'); lcdDigits(second(t));
   } else {
     unsigned long up = millis() / 1000UL;             // uptime fallback (8 cells)
     lcdDigits((int)((up / 3600UL) % 100)); lcd.write(':');
@@ -311,9 +503,9 @@ static void updateLcd() {
 
   lcd.setCursor(0, 1);
   if (haveReading) lcdTempField(fahrenheit, 5); else lcd.print(F(" --.-"));
-  lcd.write((uint8_t)223); lcd.write('F'); lcd.write(' ');
-  if (timeSynced) {
-    lcdDigits(day()); lcd.write('.'); lcdDigits(month()); lcd.write('.'); lcdDigits(year() % 100);
+  lcd.write((uint8_t)223); lcd.write('F'); lcd.write(netChar());
+  if (haveClock) {
+    lcdDigits(day(t)); lcd.write('.'); lcdDigits(month(t)); lcd.write('.'); lcdDigits(year(t) % 100);
   } else {
     lcd.print(F("no NTP  "));                          // 8 cells, matches the date field
   }
@@ -420,8 +612,9 @@ static void listJson(BufferFiller& buf) {
                index, tempCint, ifnegative);
     index++;
   }
-  buf.emit_p(PSTR("],\"uptime\":$L,\"free\":$D,\"res\":$D,\"pin\":$D,\"ntp\":$D,\"now\":$L}"),
-             millis(), freeRam(), SENSOR_RES, ONE_WIRE_BUS, timeSynced ? 1 : 0, (long)now());
+  buf.emit_p(PSTR("],\"uptime\":$L,\"free\":$D,\"res\":$D,\"pin\":$D,\"ntp\":$D,\"now\":$L,\"rst\":$D,\"why\":$D,\"dbg\":[$D,$D,$D,$D,$D,$D,$D,$D]}"),
+             millis(), freeRam(), SENSOR_RES, ONE_WIRE_BUS, timeSynced ? 1 : 0, (long)localNow(), nvTotal, nvWhy,
+             nvDbg[0], nvDbg[1], nvDbg[2], nvDbg[3], nvDbg[4], nvDbg[5], nvDbg[6], nvDbg[7]);
 }
 
 static boolean checkUrl(const __FlashStringHelper *val, const char* data) {
@@ -438,6 +631,11 @@ static boolean checkUrl(const __FlashStringHelper *val, const char* data) {
 // -------------------------------- setup ----------------------------------
 void setup() {
   Serial.begin(9600);
+
+  bool afterRestart = (nvMagic == NV_MAGIC);   // only restartMcu() sets it; anything else is a fresh start
+  nvMagic = 0;
+  if (!afterRestart) { nvStreak = nvTotal = nvWhy = 0; memset(nvDbg, 0, sizeof nvDbg); }
+  else if (nvTime) setTime((time_t)nvTime);    // keep the wall clock through a self-restart
 
   // LCD + sensor first, with an instant splash, so the display is alive even
   // with no USB host and before the network is touched.
@@ -457,6 +655,7 @@ void setup() {
   unsigned long t0 = millis();
   while (!Serial && millis() - t0 < 1500) { }   // brief; never block headless
   Serial.println(F("=== Rozna Arduino Thermometer ==="));
+  if (afterRestart) { Serial.print(F("Self-restart #")); Serial.print(nvTotal); printWhy(); }
 
   // Watchdog as an early backstop. 8 s is well above Caterina's startup time, so
   // a hang recovers via reset+retry instead of freezing/trapping the bootloader.
@@ -468,6 +667,15 @@ void setup() {
   // on a genuinely-ready chip; a missing chip or a dead oscillator drops to
   // OFFLINE and the thermometer keeps running.
   ethReady = bringUpEthernet();
+  if (ethReady) {
+    armProbe();
+    // Proves at every boot that the bank-safe reads agree with what the driver just configured.
+    uint8_t s[8];
+    encSnapshot(s);
+    auditOk = chipGood(s);
+    if (auditOk) Serial.println(F("Chip audit OK"));
+    else { Serial.print(F("Chip audit BAD")); printBytes(s); }
+  }
 }
 
 // --------------------------------- loop ----------------------------------
@@ -477,12 +685,19 @@ void loop() {
   if (ethReady) {
     // --- network is up: service the stack, web, NTP, link health ---
     word len = ether.packetReceive();
+    if (len) {
+      rxSeen = true;
+      if (isGatewayArpReply(Ethernet::buffer, len)) {   // before packetLoop() touches the buffer
+        lastAck = millis();
+        if (probeMiss) { probeMiss = false; Serial.println(F("Gateway ARP answered again")); }
+      }
+    }
     word pos = ether.packetLoop(len);
 
     // NTP answer (UDP) arrives outside the TCP path; check the raw buffer.
     uint32_t ntp = 0;
     if (len && ether.ntpProcessAnswer(&ntp, NTP_SRCPORT)) {
-      setTime((time_t)(ntp - NTP_EPOCH_1900 + UTC_OFFSET_SEC));
+      setTime((time_t)(ntp - NTP_EPOCH_1900));
       timeSynced = true;
       Serial.println(F("NTP sync OK"));
     }
@@ -506,25 +721,62 @@ void loop() {
 
     serviceTime();
 
+    // Probe the gateway on a timer; its reply proves a short frame got out and one came back.
+    if (linkUp && millis() - lastProbe > PROBE_MS) {
+      if (!probeMiss && (int32_t)(lastProbe - lastAck) > 0) {   // the previous probe got no reply
+        probeMiss = true;
+        Serial.println(F("Gateway ARP unanswered"));
+      }
+      lastProbe = millis();
+      probeGateway();
+    }
+
     // On a timer: first prove the chip still responds (bounded), THEN it's safe
-    // to read the PHY link. If it stopped responding, drop offline and re-init.
+    // to read the PHY link. If it stopped responding, re-init (MCU restart after traffic).
     if (millis() - lastLinkChk > LINK_CHECK_MS) {
       lastLinkChk = millis();
       if (!enc28j60Healthy()) {
-        Serial.println(F("NIC stopped responding -> re-init"));
-        ethReady = bringUpEthernet();      // probe-protected; may drop to OFFLINE
-        linkUp = false;
+        if (!rxSeen || millis() > (MIN_UPTIME_MS << backoff())) {
+          Serial.println(F("NIC stopped responding"));
+          ethReady = bringUpEthernet();      // probe-protected; may drop to OFFLINE
+          linkUp = false;
+        }
       } else {
-        linkUp = ether.isLinkUp();          // safe now: chip just proved responsive
-        if (linkUp) lastLinkUp = millis();
+        bool up = ether.isLinkUp();          // safe now: chip just proved responsive
+        if (up != linkUp) Serial.println(up ? F("Link UP") : F("Link DOWN"));
+        if (up && !linkUp) {
+          rxSeen = true;                     // a linked chip may already hold frames
+          armProbe();                        // link is back: restart the silence clock
+          ether.setGwIp(gwip);               // re-arm the gateway MAC lookup so NTP has somewhere to go
+        }
+        linkUp = up;
+        if (up) lastLinkUp = millis();
+        if (auditOk && millis() - lastAudit > AUDIT_MS) {   // e.g. lost padding or filter bits: the link still looks fine
+          lastAudit = millis();
+          uint8_t s[8];
+          encSnapshot(s);
+          if (chipGood(s)) auditBad = 0;
+          else if (++auditBad > 1 && millis() > (MIN_UPTIME_MS << backoff())) restartMcu(F("chip registers changed"), 4);
+        }
       }
     }
-    // Link down too long (cable out / dead port) -> re-init the chip.
-    if (ethReady && !linkUp && millis() - lastLinkUp > ETH_REINIT_MS) {
-      Serial.println(F("Link down too long -> re-init ENC28J60"));
+    // Only while the link never came up: an in-place re-init after traffic desyncs EtherCard's RX pointers.
+    if (ethReady && !linkUp && !rxSeen && millis() - lastLinkUp > ETH_REINIT_MS) {
+      Serial.println(F("No link since boot -> re-init ENC28J60"));
       ethReady = bringUpEthernet();
       lastLinkUp = millis();
     }
+    // Link lost for good after it was up: a restart is the only safe chip re-init.
+    if (ethReady && !linkUp && rxSeen && millis() - lastLinkUp > (LINK_DOWN_RESTART_MS << backoff())) {
+      restartMcu(F("no link"), 1);
+    }
+    // Link up but the gateway never answers our ARP: a short frame is not getting out or back.
+    if (ethReady && linkUp && millis() - lastAck > (SILENT_RESTART_MS << backoff())) {
+      restartMcu(F("no gateway ARP reply with link up"), 2);
+    }
+
+    // !probeMiss: the link-up grace in lastAck must not forget a streak while the gateway is still silent.
+    if (nvStreak && millis() > STREAK_CLEAR_MS && !probeMiss && millis() - lastAck < 2 * PROBE_MS) nvStreak = 0;
   } else {
     // --- OFFLINE: retry bringing up the NIC periodically (probe-protected) ---
     linkUp = false;
@@ -551,6 +803,7 @@ void loop() {
     int c10 = (int)(celsius * 10);
     Serial.print(F("alive eth="));  Serial.print(ethReady ? F("up") : F("off"));
     Serial.print(F(" link="));      Serial.print(linkUp ? F("UP") : F("DOWN"));
+    Serial.print(F(" ackage="));    Serial.print((millis() - lastAck) / 1000UL);
     Serial.print(F(" ntp="));       Serial.print(timeSynced ? F("ok") : F("no"));
     Serial.print(F(" temp="));      Serial.print(c10 / 10); Serial.write('.'); Serial.print(abs(c10 % 10));
     Serial.print(F(" free="));      Serial.println(freeRam());
