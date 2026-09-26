@@ -79,6 +79,7 @@ static const byte NTP_SERVER_IP[] = { 216, 239, 35, 4 };
 #define PROBE_MS        30000UL             // link up: ARP the gateway this often
 #define AUDIT_MS        10000UL             // read the chip's key registers this often once the boot audit passed
 #define SILENT_RESTART_MS 300000UL          // link up and no gateway ARP reply this long: restart the MCU
+#define SILENT_FAST_MS  120000UL            // same, but once the chip has flagged a receive overflow (jam evidence)
 #define LINK_DOWN_RESTART_MS 600000UL       // link down this long after it was up: restart the MCU
 #define BACKOFF_MAX     4                   // consecutive restarts double the windows, up to 16x
 #define STREAK_CLEAR_MS 1800000UL           // this much healthy uptime forgets earlier restarts
@@ -95,8 +96,7 @@ static const byte NTP_SERVER_IP[] = { 216, 239, 35, 4 };
 // host (the Arduino can't serve binaries: 28 KB flash + a ~1 KB page buffer).
 // Currently on ImgBB; swap for your own host / public-repo jsDelivr URL anytime.
 #define FOOTER_LOGO_URL "https://i.ibb.co/BKN52Q7w/arduino-logo-hugodemiglio.png"  // 256x256, downscaled in CSS
-#define FLASH_KB        "24"        // approx program-storage used (of 28), shown in the footer (update per build)
-#define ASSET_VER       "8"         // cache-bust: bump when main.css/main.js/det.js change so browsers refetch
+#define ASSET_VER       "9"         // cache-bust: bump when main.css/main.js/det.js change so browsers refetch
 // The favicon stays the self-contained 🌡️ emoji, but is served from its OWN tiny
 // route (/favicon.svg) and referenced by a SHORT href — so it never bloats the
 // home page. (Inlining it as a data: URI overflowed the buffer and reset the board.)
@@ -123,6 +123,7 @@ static uint32_t lastLinkChk   = 0;
 static uint32_t lastAck       = 0;       // last ARP reply from the gateway, or last link DOWN to UP edge
 static uint32_t lastProbe     = 0;
 static bool     probeMiss     = false;   // a probe went unanswered (noted once on Serial)
+static bool     ovfSeen       = false;   // the RX overflow flag was noted once on Serial
 static bool     auditOk       = false;   // the boot audit passed, so a later mismatch is drift, not a misread
 static uint8_t  auditBad      = 0;       // consecutive periodic audits that failed
 static uint32_t lastAudit     = 0;
@@ -143,19 +144,30 @@ static uint8_t  nvStreak __attribute__((section(".noinit")));   // consecutive s
 static uint8_t  nvTotal  __attribute__((section(".noinit")));   // self-restarts since power-up (JSON, Serial)
 static uint32_t nvTime   __attribute__((section(".noinit")));   // UTC clock across a restart, 0 = none
 static uint8_t  nvWhy    __attribute__((section(".noinit")));   // reason code of the last self-restart, 0 = none
-static uint8_t  nvDbg[8] __attribute__((section(".noinit")));   // chip snapshot taken just before it
+#define DBG_LEN 12                       // chip snapshot bytes, see encSnapshot()
+static uint8_t  nvDbg[DBG_LEN] __attribute__((section(".noinit")));   // chip snapshot taken just before it
 
 // ------------------------------- helpers ---------------------------------
 // Caterina already clears MCUSR and stops the watchdog; this covers a bootloader that does not.
 void wdtEarlyOff() __attribute__((naked, used, section(".init3")));
 void wdtEarlyOff() { MCUSR = 0; wdt_disable(); }
 
-static void encSnapshot(uint8_t out[8]);
+static void encSnapshot(uint8_t out[DBG_LEN]);
 
-// Chip snapshot bytes: ECON1 ESTAT EIR MACON1 MACON3 ERXFCON MAC-mismatch-mask 0.
-static void printBytes(const uint8_t *p) {
-  for (uint8_t i = 0; i < 8; i++) { Serial.write(' '); if (p[i] < 16) Serial.write('0'); Serial.print(p[i], HEX); }
-  Serial.println();
+// Chip snapshot bytes: ECON1 ESTAT EIR MACON1 MACON3 ERXFCON MAC-mismatch-mask EPKTCNT ERXRDPTL/H ERXWRPTL/H.
+static void printBytes(const uint8_t *p) {       // one USB write, so a host that is not reading stalls us once, not per byte
+  char b[3 * DBG_LEN + 2], *q = b;
+  for (uint8_t i = 0; i < DBG_LEN; i++) {
+    uint8_t hi = p[i] >> 4, lo = p[i] & 15;
+    *q++ = ' '; *q++ = hi < 10 ? '0' + hi : 'A' + hi - 10; *q++ = lo < 10 ? '0' + lo : 'A' + lo - 10;
+  }
+  *q++ = '\r'; *q++ = '\n';
+  Serial.write((const uint8_t *)b, q - b);
+}
+
+static void printChip(const __FlashStringHelper *what, const uint8_t *s) {
+  Serial.print(what); Serial.print(F(" at ")); Serial.print(millis() / 1000UL); Serial.print(F(" s, chip:"));
+  printBytes(s);
 }
 
 static void printWhy() {
@@ -168,15 +180,15 @@ static void restartMcu(const __FlashStringHelper *why, uint8_t code) __attribute
 static void restartMcu(const __FlashStringHelper *why, uint8_t code) {
   nvWhy = code;
   encSnapshot(nvDbg);
+  nvTime = (timeStatus() == timeNotSet) ? 0 : (uint32_t)now();
+  if (nvStreak < 200) nvStreak++;            // all bookkeeping before the prints: a watchdog reset during a stalled
+  if (nvTotal < 250) nvTotal++;              // print must still look like a self-restart and keep the evidence
+  nvMagic = NV_MAGIC;
   Serial.print(F("Restarting MCU: "));
   Serial.print(why);
   printWhy();
   Serial.flush();                            // cli() below stops the 1 ms USB flush, so hand the FIFO over now
-  nvTime = (timeStatus() == timeNotSet) ? 0 : (uint32_t)now();
   cli();
-  if (nvStreak < 200) nvStreak++;
-  if (nvTotal < 250) nvTotal++;
-  nvMagic = NV_MAGIC;
   *(volatile uint16_t *)0x0800 = 0;          // boot key 0x7777 would hold Caterina for 8 s
   *(volatile uint16_t *)(RAMEND - 1) = 0;    // same key at the newer bootloader location
   wdt_enable(WDTO_15MS);
@@ -187,6 +199,10 @@ static void restartMcu(const __FlashStringHelper *why, uint8_t code) {
 static uint8_t backoff() {
   return nvStreak > BACKOFF_MAX ? BACKOFF_MAX : nvStreak;
 }
+
+// End of the flash image (.text + .data), the same figure the IDE prints as "Sketch uses N bytes".
+extern "C" char __data_load_end;
+static uint16_t flashUsed() { return (uint16_t)(uintptr_t)&__data_load_end; }
 
 static int freeRam() {
   extern int __heap_start, *__brkval;
@@ -300,24 +316,48 @@ static uint8_t encReadBanked(uint8_t reg) {
 }
 
 // ESTAT reads 0xFF only when no chip answers; then every byte is 0xFF.
-static void encSnapshot(uint8_t out[8]) {
-  // MACON1 MACON3 ERXFCON, then MAADR5..0 which hold mymac[0..5]
-  static const uint8_t REGS[] PROGMEM = { 0xC0, 0xC2, 0x38, 0xE4, 0xE5, 0xE2, 0xE3, 0xE0, 0xE1 };
+static void encSnapshot(uint8_t out[DBG_LEN]) {
+  // MACON1 MACON3 ERXFCON, MAADR5..0 (= mymac[0..5]), then EPKTCNT and the RX read and write pointers
+  static const uint8_t REGS[] PROGMEM = { 0xC0, 0xC2, 0x38, 0xE4, 0xE5, 0xE2, 0xE3, 0xE0, 0xE1, 0x39, 0x0C, 0x0D, 0x0E, 0x0F };
   uint8_t spcr = SPCR, spsr = SPSR;
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
   out[0] = encReadReg(0x1F);
   out[1] = encReadReg(0x1D);
   out[2] = encReadReg(0x1C);
   if (out[1] == 0xFF) {
-    memset(out, 0xFF, 8);
+    memset(out, 0xFF, DBG_LEN);
   } else {
-    out[6] = out[7] = 0;
-    for (uint8_t i = 0; i < 9; i++) {
+    out[6] = 0;
+    for (uint8_t i = 0; i < 14; i++) {
       uint8_t v = encReadBanked(pgm_read_byte(REGS + i));
       if (i < 3) out[3 + i] = v;
-      else if (v != mymac[i - 3]) out[6] |= 1 << (i - 3);
+      else if (i < 9) { if (v != mymac[i - 3]) out[6] |= 1 << (i - 3); }
+      else out[i - 2] = v;              // EPKTCNT -> 7, ERXRDPTL/H -> 8, 9, ERXWRPTL/H -> 10, 11
     }
   }
+  SPI.endTransaction();
+  SPCR = spcr;                          // restore EtherCard's SPI config
+  SPSR = (SPSR & ~_BV(SPI2X)) | (spsr & _BV(SPI2X));
+}
+
+// Errata DS80349C item 14: an even ERXRDPT can corrupt the receive buffer (next packet pointer and status vector).
+// EtherCard's initialize() leaves it at 0. Use ERXND (odd), which is what its own packetReceive() writes when the
+// next packet is at 0, so the driver's pointer stays consistent. Low byte first: it is buffered until the high byte.
+static void encFixRxPtr() {
+  uint8_t spcr = SPCR, spsr = SPSR;
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  uint8_t bsel = encReadReg(0x1F) & 0x03;
+  encBsel(0);
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0x40 | 0x0C);            // WCR ERXRDPTL
+  SPI.transfer(RXSTOP_INIT & 0xFF);
+  digitalWrite(CS_PIN, HIGH);
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0x40 | 0x0D);            // WCR ERXRDPTH
+  SPI.transfer(RXSTOP_INIT >> 8);
+  digitalWrite(CS_PIN, HIGH);
+  encBsel(bsel);
+  if ((encReadReg(0x1F) & 0x03) != bsel) encBsel(bsel);
   SPI.endTransaction();
   SPCR = spcr;                          // restore EtherCard's SPI config
   SPSR = (SPSR & ~_BV(SPI2X)) | (spsr & _BV(SPI2X));
@@ -346,6 +386,7 @@ static bool bringUpEthernet() {
     Serial.println(F("ether.begin() failed -> OFFLINE"));
     return false;
   }
+  encFixRxPtr();
   ether.staticSetup(myip, gwip, dnsip, mask);
   ether.printIp(F("IP: "), ether.myip);
   haveNtpServer = false;          // re-adopt the fixed NTP server IP after a (re)init
@@ -569,7 +610,7 @@ static void mainJs(BufferFiller& buf) {
     "$.each(c.list,function(a,b){d.push('<li><a href=\"#\" onclick=\"S('+a+');return false;\"><div class=\"row\"><span class=\"nm\">🌡️ '+b.name+'</span>"
     "<span class=\"tp\">'+b.ifnegative+''+b.val.toFixed(1)/100+'<sup>&deg;C</sup></span></div></a></li>')});"
     "$('#list').html(d.join('')).trigger('create').listview('refresh');if(C>=0)R(C);var e=new Date(c.uptime);"
-    "$('#info').html('<img class=\"image\" src=\"" FOOTER_LOGO_URL "\"><br>Assembled by Bartłomiej Mróz<br>Uptime: '+e.format('UTC:HH:MM:ss')+' (RAM '+(2560-c.free)+'/2560 B, flash ~" FLASH_KB "/28 KB)')});setTimeout(reload,14974)}"));
+    "$('#info').html('<img class=\"image\" src=\"" FOOTER_LOGO_URL "\"><br>Assembled by Bartłomiej Mróz<br>Uptime: '+e.format('UTC:HH:MM:ss')+' (RAM '+(2560-c.free)+'/2560 B, flash '+(c.flash/1024).toFixed(1)+'/28 KB)')});setTimeout(reload,14974)}"));
 }
 
 // det.js: the expandable detail panel. Injects the panel div, and R()/S() render
@@ -612,9 +653,9 @@ static void listJson(BufferFiller& buf) {
                index, tempCint, ifnegative);
     index++;
   }
-  buf.emit_p(PSTR("],\"uptime\":$L,\"free\":$D,\"res\":$D,\"pin\":$D,\"ntp\":$D,\"now\":$L,\"rst\":$D,\"why\":$D,\"dbg\":[$D,$D,$D,$D,$D,$D,$D,$D]}"),
-             millis(), freeRam(), SENSOR_RES, ONE_WIRE_BUS, timeSynced ? 1 : 0, (long)localNow(), nvTotal, nvWhy,
-             nvDbg[0], nvDbg[1], nvDbg[2], nvDbg[3], nvDbg[4], nvDbg[5], nvDbg[6], nvDbg[7]);
+  buf.emit_p(PSTR("],\"uptime\":$L,\"free\":$D,\"flash\":$D,\"res\":$D,\"pin\":$D,\"ntp\":$D,\"now\":$L,\"rst\":$D,\"why\":$D,\"dbg\":[$D,$D,$D,$D,$D,$D,$D,$D,$D,$D,$D,$D]}"),
+             millis(), freeRam(), (int)flashUsed(), SENSOR_RES, ONE_WIRE_BUS, timeSynced ? 1 : 0, (long)localNow(), nvTotal, nvWhy,
+             nvDbg[0], nvDbg[1], nvDbg[2], nvDbg[3], nvDbg[4], nvDbg[5], nvDbg[6], nvDbg[7], nvDbg[8], nvDbg[9], nvDbg[10], nvDbg[11]);
 }
 
 static boolean checkUrl(const __FlashStringHelper *val, const char* data) {
@@ -670,7 +711,7 @@ void setup() {
   if (ethReady) {
     armProbe();
     // Proves at every boot that the bank-safe reads agree with what the driver just configured.
-    uint8_t s[8];
+    uint8_t s[DBG_LEN];
     encSnapshot(s);
     auditOk = chipGood(s);
     if (auditOk) Serial.println(F("Chip audit OK"));
@@ -681,6 +722,12 @@ void setup() {
 // --------------------------------- loop ----------------------------------
 void loop() {
   Watchdog.reset();
+
+  if (ethReady && Serial.available() && Serial.read() == 'd') {   // send "d" over USB for a chip snapshot on demand
+    uint8_t s[DBG_LEN];
+    encSnapshot(s);
+    printChip(F("chip"), s);
+  }
 
   if (ethReady) {
     // --- network is up: service the stack, web, NTP, link health ---
@@ -725,7 +772,9 @@ void loop() {
     if (linkUp && millis() - lastProbe > PROBE_MS) {
       if (!probeMiss && (int32_t)(lastProbe - lastAck) > 0) {   // the previous probe got no reply
         probeMiss = true;
-        Serial.println(F("Gateway ARP unanswered"));
+        uint8_t s[DBG_LEN];
+        encSnapshot(s);
+        printChip(F("Gateway ARP unanswered"), s);
       }
       lastProbe = millis();
       probeGateway();
@@ -743,7 +792,7 @@ void loop() {
         }
       } else {
         bool up = ether.isLinkUp();          // safe now: chip just proved responsive
-        if (up != linkUp) Serial.println(up ? F("Link UP") : F("Link DOWN"));
+        if (up != linkUp) { Serial.print(up ? F("Link UP at ") : F("Link DOWN at ")); Serial.println(millis() / 1000UL); }
         if (up && !linkUp) {
           rxSeen = true;                     // a linked chip may already hold frames
           armProbe();                        // link is back: restart the silence clock
@@ -753,8 +802,12 @@ void loop() {
         if (up) lastLinkUp = millis();
         if (auditOk && millis() - lastAudit > AUDIT_MS) {   // e.g. lost padding or filter bits: the link still looks fine
           lastAudit = millis();
-          uint8_t s[8];
+          uint8_t s[DBG_LEN];
           encSnapshot(s);
+          if (!ovfSeen && s[1] != 0xFF && ((s[1] & 0x40) || (s[2] & 0x01))) {   // ESTAT.BUFER or EIR.RXERIF since the chip reset
+            ovfSeen = true;
+            printChip(F("RX overflow flag"), s);
+          }
           if (chipGood(s)) auditBad = 0;
           else if (++auditBad > 1 && millis() > (MIN_UPTIME_MS << backoff())) restartMcu(F("chip registers changed"), 4);
         }
@@ -771,7 +824,7 @@ void loop() {
       restartMcu(F("no link"), 1);
     }
     // Link up but the gateway never answers our ARP: a short frame is not getting out or back.
-    if (ethReady && linkUp && millis() - lastAck > (SILENT_RESTART_MS << backoff())) {
+    if (ethReady && linkUp && millis() - lastAck > ((ovfSeen ? SILENT_FAST_MS : SILENT_RESTART_MS) << backoff())) {
       restartMcu(F("no gateway ARP reply with link up"), 2);
     }
 
