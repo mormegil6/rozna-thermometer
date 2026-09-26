@@ -12,11 +12,11 @@ The 2015 code is kept as the reference; the revival modernises it for current
 toolchains, fixes the one thing that never worked back then (the ENC28J60 needed a
 hardware reset), and adds resilience so it can run headless and unattended.
 
-| 2015, the original build | 2026, the revived web UI |
-|:---:|:---:|
-| <img src="docs/original-2015-build.jpg" width="440" alt="The original 2015 breadboard build"> | <img src="docs/web-ui-2026.png" width="210" alt="The revived 2026 web UI in Brave"> |
+| 2015, the original build | 2026, the revived build | 2026, the public web UI |
+|:---:|:---:|:---:|
+| <a href="docs/original-2015-build.jpg"><img src="docs/original-2015-build.jpg" width="300" alt="The original 2015 breadboard build"></a> | <a href="docs/enclosure-front.jpg"><img src="docs/enclosure-front.jpg" width="300" alt="The 2026 build in its 3D-printed enclosure, the DS18B20 probe on its cable in front"></a> | <a href="docs/web-ui-2026.png"><img src="docs/web-ui-2026.png" width="150" alt="The web UI at thermometer.bmroz.eu in Brave on Android"></a> |
 
-*Left: the original 2015 build, LCD reading -0.19 C at 21:14 on 26 Jan 2015. Right: the revived 2026 web UI (Brave on Android) with a sensor's detail panel expanded.*
+*Left: the original 2015 build, LCD reading -0.19 C at 21:14 on 26 Jan 2015. Middle: the 2026 build in its 3D-printed enclosure, the DS18B20 probe on its cable in front. Right: the public web UI at thermometer.bmroz.eu (Brave on Android) with a sensor's detail panel expanded. Click an image for the full size.*
 
 ## History
 
@@ -65,9 +65,19 @@ Raspberry Pi).
 | LCD | see LCD pin map below | 16x2 HD44780, 4-bit mode, `LiquidCrystal lcd(7,6,5,4,3,2)` |
 | DS18B20 DATA | D10 | 4.7 kOhm pull-up DATA to 5V, required |
 | ENC28J60 SPI (MISO/MOSI/SCK) | ICSP header | not pins 11/12/13 on a Leonardo |
-| ENC28J60 CS | D8 | see "CS gotcha" below |
-| ENC28J60 RST | D9 | required, see "RST gotcha" below |
+| ENC28J60 CS | D8 | see Gotchas below |
+| ENC28J60 RST | D9 | required, see Gotchas below |
 | ENC28J60 VCC / GND | 3.3V (or 5V if the module has a regulator) / GND | |
+
+**The probe plugs in through a 3.5 mm jack.** A small nod to my audio work these
+days, and honestly just the first 3-pin connector that came to mind and was easy to
+get. It works well, with two things to know. A plug bridges neighbouring contacts
+while it is being inserted, so the layout matters for hot-plugging: tip = +5V, ring
+(the middle contact) = GND, sleeve = DATA, which turns the unavoidable transient
+shorts into +5V to GND and DATA to GND instead of +5V to DATA. And a series resistor
+of 220 to 470 ohms in the +5V line is cheap insurance against a plug pulled out at an
+angle. The 4.7 kOhm pull-up still has to bridge DATA to +5V as its own branch, not sit
+in line with the signal.
 
 ### LCD pin map
 
@@ -87,22 +97,12 @@ Raspberry Pi).
 | A | 15 | +5V (through ~220R if the module has no onboard resistor) | backlight |
 | K | 16 | GND | backlight |
 
-**CS gotcha.** EtherCard's `begin()` default chip-select drifted from pin 8 (old)
-to `SS`, which is pin 17 on the Leonardo (current library). The 2015 sketch relied
-on the old default, so the real wiring is CS=8. The sketch sets `CS_PIN 8`
-explicitly.
-
-**RST gotcha (the actual 2015 bug).** The ENC28J60 needs a hardware reset pulse or
-its PHY will not link. That was the original "never appears on the router" symptom.
-Wire `RST` to D9; the firmware pulses it before every `ether.begin()`. Note that SPI
-register reads are clocked by the Arduino, so the chip answers SPI even when its own
-25 MHz crystal is not running. The firmware therefore also checks the
-oscillator-ready bit (`CLKRDY`) before trusting it.
-
-**Solid connections matter.** On a breadboard with dupont wires, bumping the board
-can knock the ENC's SPI or power loose (this happened repeatedly during bring-up).
-For a permanent install, solder or use locking connectors on the ENC's SPI, power
-and RST lines.
+**Gotchas.** The ENC28J60 needs a hardware reset: wire its `RST` to D9, or its PHY
+never links (that was the 2015 "never appears on the router" bug). Keep its chip
+select on D8, because EtherCard's default drifted to pin 17 on the Leonardo. Both are
+set in the sketch. Connections on a breadboard are easily bumped loose, so solder or
+use locking connectors for a permanent install. More in
+[docs/hardware-notes.md](docs/hardware-notes.md).
 
 ### Enclosure
 
@@ -115,121 +115,66 @@ for credit). Design files are in [`enclosure/`](enclosure/): the full assembly
 ([`Termo_box.stl`](enclosure/Termo_box.stl), [`Termo_lid.stl`](enclosure/Termo_lid.stl)).
 A live, editable version is also on
 [Fusion 360](https://mypg468.autodesk360.com/g/shares/SH28cd1QT2badd0ea72b3ebdcf2fd0c9138a).
-Photos to follow in `docs/`.
+The Leonardo's RESET button is inside the box, so a manual reset means opening the
+lid (the firmware restarts itself when it has to).
+
+| The knobs: brightness (top), contrast (bottom) | Inside, lid off (assembly, August 2026) | The lid carries the LCD (assembly, August 2026) |
+|:---:|:---:|:---:|
+| <a href="docs/enclosure-side-knobs.jpg"><img src="docs/enclosure-side-knobs.jpg" width="170" alt="Side of the enclosure with the brightness and contrast knobs and their embossed icons"></a> | <a href="docs/enclosure-inside.jpg"><img src="docs/enclosure-inside.jpg" width="300" alt="Inside the box: Leonardo, ENC28J60 module and the two potentiometers"></a> | <a href="docs/enclosure-open-lid.jpg"><img src="docs/enclosure-open-lid.jpg" width="300" alt="The open lid with the LCD's back and header"></a> |
+
+It is cramped and not pretty inside. These two were taken during assembly, before the
+lid went on. The LCD's pin header was removed and wires were soldered straight to its
+pads, because the header pins stuck out too far and collided with the Arduino's pin
+sockets.
+
+| Mid-wiring, wires soldered straight to the LCD (August 2026) | Wired up right before closing the lid (August 2026) |
+|:---:|:---:|
+| <a href="docs/enclosure-wiring-midway.jpg"><img src="docs/enclosure-wiring-midway.jpg" width="480" alt="Box open with wires soldered directly to the LCD pads"></a> | <a href="docs/enclosure-wiring-closing.jpg"><img src="docs/enclosure-wiring-closing.jpg" width="270" alt="The finished wiring inside the box just before the lid was closed"></a> |
 
 ## How it works
 
-### Web UI and API
-
-The Arduino serves only a small HTML shell plus `main.css`, `main.js`, `det.js` and
-`/list.json`. The heavy assets (jQuery 1.8.2, jQuery-Mobile 1.2.0 js+css,
-`date.format.js`) are loaded by the browser from `code.jquery.com` over HTTPS; at
-about 284 KB they would never fit in 28 KB of flash. This is the original 2015
-architecture, preserved.
-
-- `GET /` serves the HTML shell (header "Rožna Arduino Thermometer", inset
-  listview, footer).
-- `GET /main.css`, `GET /main.js`, `GET /det.js` are served from PROGMEM.
-- `GET /list.json` returns `{"list":[{"id","name","val","ifnegative"}],"uptime","free","res","pin","ntp","now","rst","why","dbg"}`,
-  where `val` is degrees C times 100 (the JS divides by 100), `now` is local time,
-  `rst` counts self-restarts since power-up, `why` is the reason code of the last
-  self-restart (0 none, 1 no link, 2 no gateway ARP reply, 3 NIC re-init after
-  traffic, 4 chip registers changed) and `dbg` is the chip snapshot taken just
-  before it (see Resilience). The footer shows the
-  "Assembled by Bartłomiej Mróz" credit, uptime, and memory use (RAM and flash both
-  as used / total, matching the Arduino IDE).
-- Tapping a sensor row slides open an inline detail panel (and rotates the row's
-  arrow 90 degrees): ROM id, C and F, resolution, data pin, the NTP clock (same as
-  the LCD), uptime, RAM use and NTP status. Tap again to collapse.
-
-**Images.** The browser-tab icon is a self-contained thermometer emoji served as a
-tiny SVG from its own `/favicon.svg` route. The footer logo (`ardu.png`) is a raster
-image, browser-loaded from an external host (`FOOTER_LOGO_URL`, currently ImgBB);
-the Arduino never serves image bytes. Static assets are cache-busted with a `?v=`
-version (`ASSET_VER`), so changes reach the browser without a manual cache clear.
-
-### NTP clock
-
-Replaces the original serial time-sync, which froze the board at boot waiting for a
-PC. `serviceTime()` sends an NTP request to a fixed server IP (Google Public NTP,
-`NTP_SERVER_IP`) rather than a hostname: `ether.dnsLookup()` can block for about 30 s
-when a query gets no reply, and that froze the whole loop, LCD included. The answer
-sets the Time library clock, which holds UTC. `localNow()` adds the Polish offset
-(CET, plus EU summer time from 01:00 UTC on the last Sunday of March to 01:00 UTC on
-the last Sunday of October) for the LCD and the JSON `now`. It re-syncs hourly, and
-until the first answer the LCD shows uptime.
-
-### Performance
-
-- **Non-blocking sensor.** DS18B20 conversions run asynchronously
-  (`waitForConversion=false`), started on a timer and read about `CONV_DELAY_MS`
-  later. Neither the LCD nor `/list.json` waits on a conversion, so `/list.json`
-  answers in about 40 ms. The old code blocked roughly 750 ms, twice.
-- **Browser caching.** `main.css`, `main.js`, `det.js` and `favicon.svg` are sent
-  with `Cache-Control: max-age=86400`; only `/list.json` is `no-cache`.
-- **LCD in place.** It repaints without `lcd.clear()` (no flicker), about twice a
-  second so the seconds never skip, and temperatures are formatted with integer
-  math so the float-to-string code is never linked.
+The Arduino serves the original 2015 jQuery-Mobile page (`/`, `main.css`, `main.js`,
+`det.js`, `/favicon.svg`) and a `/list.json` API with the temperature and the health
+fields. The heavy jQuery and jQuery-Mobile files load from `code.jquery.com`, because
+284 KB would never fit in 28 KB of flash. The clock comes from NTP with a fixed server
+IP (a DNS lookup used to freeze the whole loop), and EU summer time is computed on the
+board. Sensor reads are asynchronous, so nothing waits on a 750 ms conversion. Details
+and the JSON fields: [docs/how-it-works.md](docs/how-it-works.md).
 
 ### Resilience
 
-- Hardware reset of the ENC28J60 (`RST` to D9) before every bring-up.
-- A bounded SPI plus CLKRDY probe before `ether.begin()`. `begin()` spins forever on
-  an unresponsive chip, so it is never called unless the chip answers and its
-  oscillator is running. A missing or dead NIC drops to OFFLINE: the LCD and sensor
-  keep working and the firmware retries the NIC every 15 s.
-- The NIC is never re-initialised in place once it may have received a frame.
-  EtherCard keeps its receive pointers in function-local statics that
-  `ether.begin()` cannot reset, so an in-place re-init leaves the receive path out of
-  step with the chip: the board still transmits but never answers ARP or ping. A lost
-  link is simply waited out (the receive ring is untouched), and if the chip does not
-  resume when the link returns, the ladder below restarts the MCU.
-- Recovery ladder. With the link up the board sends an ARP request to the gateway
-  every 30 s, and only the gateway's reply counts as proof of life: it needs a short
-  frame to leave the board and a reply to come back, whereas any received frame would
-  hide a chip that receives but cannot send. The MCU restarts with a watchdog reset
-  (about 5 s, which also clears the EtherCard pointers) after 5 min without a reply,
-  10 min with the link down after it was up, a NIC fault after traffic, or the chip's
-  key registers (ECON1.RXEN, MACON1, MACON3, ERXFCON, the MAC address) changing on two
-  checks 10 s apart. Consecutive restarts stretch the windows up to 16 times, and 30
-  min of healthy uptime forgets them. The clock survives a restart. `gwip` must
-  answer ARP, otherwise a bench board with no gateway restarts at 5, 10, 20, 40 and
-  then every 80 min.
-- Evidence for the next failure. Before a self-restart the chip's registers are read
-  (ECON1 ESTAT EIR MACON1 MACON3 ERXFCON, a mask of wrong MAC bytes, and a spare
-  byte), printed on Serial, kept in RAM across the restart and served as `why` and
-  `dbg` in `/list.json`. The read restores ECON1.BSEL, so EtherCard's cached register
-  bank stays valid. At every boot Serial shows `Chip audit OK` when those registers
-  match what EtherCard configured, or `Chip audit BAD` with the bytes.
-- LCD status cells, both blank when all is well: row 0 column 8 shows recent
-  self-restarts (`+` above 9) and clears itself after 30 min of healthy uptime, row 1
-  column 8 is `O` for NIC offline, `L` for no link and `S` for link up but no
-  gateway ARP reply for 90 s. The lifetime restart count is `rst` in `/list.json`.
-- The DS18B20 can be plugged in at any time. DallasTemperature only counts devices in
-  `begin()`, so a probe attached after boot used to stay invisible; while none is
-  known the sketch checks the bus every 3 s and re-runs `begin()` when one appears.
-- SleepyDog watchdog (8 s), safe on the 32u4 bootloader.
-- Temperature and LCD are fully decoupled from the network, so the monitor always
-  works.
+The ENC28J60 is the weak link, so the firmware is built to survive it and to recover
+without a person:
+
+- A hardware reset over `RST` (D9) and a bounded SPI and oscillator check before
+  `ether.begin()`, so a dead NIC never hangs the board. The LCD and the sensor keep
+  working, and the NIC is retried every 15 s.
+- The NIC is never re-initialised in place after traffic (EtherCard cannot resync its
+  receive pointers). Instead a gateway ARP round trip proves the network path, and a
+  watchdog restart of the MCU (about 5 s) follows 5 minutes of silence (2 once the chip has flagged a receive overflow) or 10 minutes
+  without a link.
+- The chip's key registers are checked every 10 s. The evidence (`rst`, `why`, `dbg`)
+  survives a restart and is served in `/list.json`.
+- Two LCD status cells stay blank when all is well: row 1 character 8 counts recent
+  self-restarts, row 2 character 8 shows `O` (NIC offline), `L` (no link) or `S` (link
+  up, no gateway reply).
+- The DS18B20 can be plugged in at any time.
+
+Full description: [docs/resilience.md](docs/resilience.md).
 
 ### Public access
 
 The page is public at https://thermometer.bmroz.eu, but visitors never reach the
-Arduino. A Raspberry Pi on the same LAN sits in front of it:
+Arduino:
 
 ```
 visitor -> Cloudflare (HTTPS) -> cloudflared on the Pi -> nginx cache on the Pi (127.0.0.1:8081) -> Arduino
 ```
 
-The Arduino still serves the page and `/list.json`; the Pi only caches and relays.
-A 10 Mbit ENC28J60 with one 1150 byte buffer cannot serve a crowd, and every open
-tab polls every 15 s, so nginx answers visitors from a cache (`/list.json` for 10 s,
-the page for 60 s, assets for 10 min), proxies only the board's six URLs, holds at
-most 2 connections open to it and limits each visitor to 5 requests per second. The
-board sees about one request per 10 s however many people watch. `cloudflared` only
-makes outbound connections, so no router port is forwarded and the home IP is not
-published. Do not forward a port straight to the Arduino: it speaks plain HTTP with
-no authentication. The configs and setup steps are in [pi/](pi/README.md).
+A Raspberry Pi on the same LAN answers visitors from a cache and forwards about one
+request per 10 s to the board, however many people watch. No router port is
+forwarded, and none should be: the board speaks plain HTTP with no authentication.
+Configs and setup steps: [pi/](pi/README.md).
 
 ## Build and upload
 
@@ -245,7 +190,7 @@ Built with **arduino-cli 1.5.1**, core **arduino:avr 1.8.8**, FQBN
 | Time | 1.6.1 |
 | LiquidCrystal | 1.0.7 |
 
-Footprint: about 24.2 KB of 28 KB flash (84 %), about 1.6 KB of 2.5 KB RAM (64 %).
+Footprint: about 26.3 KB of 28 KB flash (93 %), about 1.6 KB of 2.5 KB RAM (65 %).
 
 ```sh
 # one-time setup
@@ -266,19 +211,8 @@ arduino-cli monitor -p <PORT> -c baudrate=9600
 Bring up the subsystems first with the `diagnostics/` sketches (upload each, read
 Serial), then flash the main sketch.
 
-**If upload fails (`butterfly_recv ... failed`).** The Leonardo's 1200-baud
-auto-reset can stop dropping the board into the Caterina bootloader (common after
-many upload cycles, or with a watchdog sketch), and arduino-cli then flashes against
-the running sketch and fails. Recovery: double-tap RESET (the "L" LED pulses, which
-means the bootloader is up for about 8 s) and flash with avrdude directly, bypassing
-the 1200-baud touch:
-
-```sh
-AV=~/Library/Arduino15/packages/arduino/tools/avrdude/8.0.0-arduino1
-# the hex path is shown by:  arduino-cli upload -v ...   (under ~/Library/Caches/arduino/sketches/<hash>/)
-"$AV/bin/avrdude" "-C$AV/etc/avrdude.conf" -patmega32u4 -cavr109 -P<PORT> -b57600 -D \
-  -Uflash:w:<sketch>.ino.hex:i
-```
+**If upload fails** with `butterfly_recv ... failed`, the Leonardo's 1200-baud
+auto-reset did not reach the bootloader. See [docs/flashing.md](docs/flashing.md).
 
 ## Configuration (top of the sketch)
 
@@ -294,8 +228,8 @@ AV=~/Library/Arduino15/packages/arduino/tools/avrdude/8.0.0-arduino1
 | `mymac` | `02:52:6F:7A:6E:61` | locally-administered MAC |
 | `myip` / `gwip` / `dnsip` / `mask` | `192.168.1.200` / `.1` / `.1` / `/24` | office network |
 | `UTC_STD_OFFSET_SEC` | `1*3600` | CET (winter) offset; EU summer time is added automatically |
-| `PROBE_MS` / `AUDIT_MS` / `SILENT_RESTART_MS` / `LINK_DOWN_RESTART_MS` | 30 s / 10 s / 5 min / 10 min | gateway ARP probe and chip register check intervals, then MCU restart when the gateway never replies or the link is lost |
-| `ASSET_VER` | `"6"` | cache-bust version; bump when main.css/main.js/det.js change |
+| `PROBE_MS` / `AUDIT_MS` / `SILENT_RESTART_MS` / `SILENT_FAST_MS` / `LINK_DOWN_RESTART_MS` | 30 s / 10 s / 5 min / 2 min / 10 min | gateway ARP probe and chip register check intervals, then MCU restart when the gateway never replies or the link is lost |
+| `ASSET_VER` | `"9"` | cache-bust version; bump when main.css/main.js/det.js change |
 | `FOOTER_LOGO_URL` | ImgBB link | footer logo image |
 
 For bench testing on a different subnet, change `myip` / `gwip` / `dnsip` (for
@@ -314,38 +248,10 @@ Upload each, read Serial at 9600. Pass criteria:
 
 ## What changed since the 2015 code
 
-The 2015 architecture was sound and is largely preserved: the web design,
-`/list.json`, the HTTP parser, sensor enumeration and LCD layout are essentially
-unchanged. The changes fall into three buckets.
-
-**Trivial modernisation**
-
-- MAC changed from the textbook `DE:AD:BE:EF:FE:ED` to a locally-administered `02:..`
-- Explicit `CS=8` (EtherCard's default CS drifted to `SS`, pin 17, on the Leonardo)
-- `<Time.h>` to `<TimeLib.h>`; verified against current DallasTemperature, OneWire and EtherCard
-- CDN tags switched from protocol-relative `//` to `https://`
-- Removed the dead `s3.postimg.org` footer image; kept the credit, uptime and free-RAM footer
-
-**One feature swap**
-
-- NTP replaces serial time-sync, so the board no longer freezes at boot waiting for
-  a connected PC and keeps real time headless.
-
-**Reliability, the bulk of the new code and the real 2015 fix**
-
-- Hardware reset of the ENC28J60 over `RST` to D9, the missing piece that made the
-  PHY actually link (the original "never appears on the router" bug).
-- An SPI plus CLKRDY probe before `ether.begin()`, so a missing, dead or
-  half-connected NIC can never hang the board; it degrades to OFFLINE and retries.
-- SleepyDog watchdog (safe on the 32u4).
-- A fixed NTP server IP instead of a DNS lookup, because a blocking lookup froze the
-  whole loop, LCD included, whenever a query got no answer.
-- No in-place NIC re-init after traffic (EtherCard cannot resynchronise its receive
-  pointers), and a restart ladder for a dead receive path (see Resilience).
-- Automatic EU summer time for the LCD clock.
-- Temperature and LCD decoupled from Ethernet; a Serial heartbeat for observability.
-- Async sensor reads, browser-cached static assets with cache-busting, integer
-  formatting, 11-bit DS18B20, and the expandable per-sensor detail panel.
+The 2015 architecture was sound and is largely preserved. The changes are a few
+modernisations, NTP instead of a serial time-sync, and a lot of reliability work (the
+hardware reset was the real 2015 fix). See
+[docs/changes-since-2015.md](docs/changes-since-2015.md).
 
 ## Known issues
 
@@ -355,19 +261,16 @@ unchanged. The changes fall into three buckets.
   the module (about 3 USD); the firmware and EtherCard code are unchanged either way.
 - Latency is jittery (it is a slow 10 Mbps chip on breadboard wiring) but lossless
   once connected.
-- Field failure seen on 2026-09-25, cause not yet proven: LCD, clock and link LEDs
-  fine, but the board answered ping (with a static ARP entry) and never answered ARP
-  or completed a TCP handshake, from wired and Wi-Fi clients alike. Every frame the
-  firmware sends with an explicit short length (the 42 byte ARP reply, the SYN-ACK)
-  was lost, while echo replies, which copy the incoming length, were fine. The
-  suspect is the chip no longer padding short frames (MACON3), so the router drops
-  them; a power cycle fixed the same symptom the day before. The gateway ARP round
-  trip now detects it and the register snapshot should show which register changed.
-- EtherCard 1.1.0 cannot be re-initialised in place after it has received a frame
-  (`packetReceive()` keeps private static pointers that `ether.begin()` does not
-  reset). Do not call `ether.begin()` again from your own code once traffic has
-  flowed; the firmware restarts the MCU instead. Confirmed in the source and a
-  simulation, not yet on hardware.
+- Field failures on 2026-09-25 and 2026-09-26, cause not yet proven: the board stops
+  answering ARP and TCP until it is restarted. The gateway ARP round trip now detects
+  it and restarts the board by itself (it did on 09-26, after about 5 minutes), and the
+  saved chip snapshot narrows the cause. Details in
+  [docs/resilience.md](docs/resilience.md#field-failure-2026-09-25).
+- The ENC28J60 module is powered from the Leonardo's 3.3 V pin, documented for only
+  about 50 mA against 120 to 200 mA for the chip once linked. On 2026-09-26 its
+  registers were repeatedly scrambled while the MCU kept running; the firmware
+  restarted itself each time. A separate 3.3 V regulator for the module is the likely
+  fix. Details in [docs/resilience.md](docs/resilience.md#chip-state-corruption-2026-09-26-hardware-suspected).
 - A static-IP ENC28J60 takes no DHCP lease, so it will not appear in the router's
   device list. Verify with `ping`, not the router UI.
 
@@ -390,7 +293,7 @@ original-2015/                                    the untouched 2015 sketches (r
 pi/                                               nginx cache and Cloudflare tunnel config for public access
 enclosure/                                        enclosure design files (STEP, STL)
 ardu_tempserver_logos/                            logo/icon source files
-docs/                                             README images
+docs/                                             README images and the detailed notes
 README.md  LICENSE  .gitignore
 ```
 
