@@ -25,7 +25,9 @@ each room got two public, routable IP addresses (one per desk), so the thermomet
 page was reachable from the open internet, not just the LAN. Our room's router ran
 OpenWrt with 802.1X on the WiFi, so we were the only ones online in there, which is
 part of why a tiny ENC28J60 web server made sense at all. The 2026 revival runs on a
-normal office LAN, so the page is LAN-only now unless you forward a port.
+normal office LAN, so the board itself is LAN-only. The page is made public through
+a caching proxy and a Cloudflare tunnel on a Raspberry Pi instead of a router port
+forward (see *Public access*).
 
 ## Status
 
@@ -43,6 +45,7 @@ Raspberry Pi).
 | ENC28J60 Ethernet, web, `/list.json` | working (needs `RST` wired to D9, see below) |
 | NTP clock | working |
 | Watchdog and resilience | working |
+| Public page, https://thermometer.bmroz.eu | working (nginx cache and Cloudflare tunnel on a Pi, see `pi/`) |
 | Telegram alerting | deferred (Pi-side poller, see *Alerting*) |
 
 ## Hardware and wiring
@@ -209,6 +212,25 @@ until the first answer the LCD shows uptime.
 - Temperature and LCD are fully decoupled from the network, so the monitor always
   works.
 
+### Public access
+
+The page is public at https://thermometer.bmroz.eu, but visitors never reach the
+Arduino. A Raspberry Pi on the same LAN sits in front of it:
+
+```
+visitor -> Cloudflare (HTTPS) -> cloudflared on the Pi -> nginx cache on the Pi (127.0.0.1:8081) -> Arduino
+```
+
+The Arduino still serves the page and `/list.json`; the Pi only caches and relays.
+A 10 Mbit ENC28J60 with one 1150 byte buffer cannot serve a crowd, and every open
+tab polls every 15 s, so nginx answers visitors from a cache (`/list.json` for 10 s,
+the page for 60 s, assets for 10 min), proxies only the board's six URLs, holds at
+most 2 connections open to it and limits each visitor to 5 requests per second. The
+board sees about one request per 10 s however many people watch. `cloudflared` only
+makes outbound connections, so no router port is forwarded and the home IP is not
+published. Do not forward a port straight to the Arduino: it speaks plain HTTP with
+no authentication. The configs and setup steps are in [pi/](pi/README.md).
+
 ## Build and upload
 
 Built with **arduino-cli 1.5.1**, core **arduino:avr 1.8.8**, FQBN
@@ -363,8 +385,10 @@ office-side host is needed.
 
 ```
 firmware/TempServerJQuery/TempServerJQuery.ino   the modernised sketch (office IP)
-diagnostics/diag_01_blink/ ... diag_04_ethernet/ Stage A bring-up sketches
+diagnostics/diag_01_blink/ ... diag_07_.../     bring-up and hardware diagnostic sketches
 original-2015/                                    the untouched 2015 sketches (reference)
+pi/                                               nginx cache and Cloudflare tunnel config for public access
+enclosure/                                        enclosure design files (STEP, STL)
 ardu_tempserver_logos/                            logo/icon source files
 docs/                                             README images
 README.md  LICENSE  .gitignore

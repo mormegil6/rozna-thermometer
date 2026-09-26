@@ -1,0 +1,8 @@
+# /etc/cloudflared/config.yml on the Pi. Replace <TUNNEL-ID> with the id printed by
+# "cloudflared tunnel create thermometer". The credentials file is a secret (mode 600, root).
+tunnel: <TUNNEL-ID>
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+ingress:
+  - hostname: thermometer.bmroz.eu
+    service: http://127.0.0.1:8081
+  - service: http_status:404
