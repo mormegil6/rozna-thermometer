@@ -22,12 +22,11 @@ How the firmware survives a flaky ENC28J60 and recovers without a person. The su
   hide a chip that receives but cannot send. The MCU restarts with a watchdog reset
   (about 5 s, which also clears the EtherCard pointers) after 5 min without a reply (2 min once the chip has flagged a receive
   overflow),
-  10 min with the link down after it was up, a NIC fault after traffic, or the chip's
+  3 min with the link down after it was up, a NIC fault after traffic, or the chip's
   key registers (ECON1.RXEN, MACON1, MACON3, ERXFCON, the MAC address) changing on two
-  checks 10 s apart. Consecutive restarts stretch the windows up to 16 times, and 30
+  checks 10 s apart. Consecutive restarts stretch the windows up to 4 times, and 30
   min of healthy uptime forgets them. The clock survives a restart. `gwip` must
-  answer ARP, otherwise a bench board with no gateway restarts at 5, 10, 20, 40 and
-  then every 80 min.
+  answer ARP, otherwise a bench board with no gateway restarts at 5, 10 and then every 20 min.
 - Evidence for the next failure. Before a self-restart the chip's registers are read
   (12 bytes: ECON1 ESTAT EIR MACON1 MACON3 ERXFCON, a mask of wrong MAC bytes,
   EPKTCNT, then the receive buffer pointers ERXRDPT and ERXWRPT, low byte first),

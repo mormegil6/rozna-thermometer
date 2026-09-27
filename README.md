@@ -3,8 +3,8 @@
 # arduino-thermometer - Rožna Arduino Thermometer
 
 A networked temperature monitor first built in 2015 in a student dorm on Rožna
-dolina (Ljubljana), revived in 2026 to watch an office for overheating. An Arduino
-**Leonardo** reads a **DS18B20**, shows the temperature and an NTP clock on a 16x2
+dolina (Ljubljana), revived in 2026 for reliable, unattended temperature monitoring.
+An Arduino **Leonardo** reads a **DS18B20**, shows the temperature and an NTP clock on a 16x2
 LCD, and serves the original jQuery-Mobile web page plus a `/list.json` API over
 Ethernet (**ENC28J60**). Assembled by Bartłomiej Mróz.
 
@@ -24,10 +24,10 @@ The original ran in a Ljubljana student dorm where the network was unusually ope
 each room got two public, routable IP addresses (one per desk), so the thermometer's
 page was reachable from the open internet, not just the LAN. Our room's router ran
 OpenWrt with 802.1X on the WiFi, so we were the only ones online in there, which is
-part of why a tiny ENC28J60 web server made sense at all. The 2026 revival runs on a
-normal office LAN, so the board itself is LAN-only. The page is made public through
-a caching proxy and a Cloudflare tunnel on a Raspberry Pi instead of a router port
-forward (see *Public access*).
+part of why a tiny ENC28J60 web server made sense at all. The 2026 revival runs on an
+ordinary LAN, wherever it is plugged in, so the board itself is LAN-only. The page is
+made public through a caching proxy and a Cloudflare tunnel on a Raspberry Pi instead
+of a router port forward (see *Public access*).
 
 ## Status
 
@@ -151,7 +151,7 @@ without a person:
   working, and the NIC is retried every 15 s.
 - The NIC is never re-initialised in place after traffic (EtherCard cannot resync its
   receive pointers). Instead a gateway ARP round trip proves the network path, and a
-  watchdog restart of the MCU (about 5 s) follows 5 minutes of silence (2 once the chip has flagged a receive overflow) or 10 minutes
+  watchdog restart of the MCU (about 5 s) follows 5 minutes of silence (2 once the chip has flagged a receive overflow) or 3 minutes
   without a link.
 - The chip's key registers are checked every 10 s. The evidence (`rst`, `why`, `dbg`)
   survives a restart and is served in `/list.json`.
@@ -226,9 +226,9 @@ auto-reset did not reach the bootloader. See [docs/flashing.md](docs/flashing.md
 | `ETH_RST_PIN` | `9` | ENC28J60 hardware reset (comment out if unwired) |
 | `ONE_WIRE_BUS` | `10` | DS18B20 data pin |
 | `mymac` | `02:52:6F:7A:6E:61` | locally-administered MAC |
-| `myip` / `gwip` / `dnsip` / `mask` | `192.168.1.200` / `.1` / `.1` / `/24` | office network |
+| `myip` / `gwip` / `dnsip` / `mask` | `192.168.1.200` / `.1` / `.1` / `/24` | the network it is deployed on |
 | `UTC_STD_OFFSET_SEC` | `1*3600` | CET (winter) offset; EU summer time is added automatically |
-| `PROBE_MS` / `AUDIT_MS` / `SILENT_RESTART_MS` / `SILENT_FAST_MS` / `LINK_DOWN_RESTART_MS` | 30 s / 10 s / 5 min / 2 min / 10 min | gateway ARP probe and chip register check intervals, then MCU restart when the gateway never replies or the link is lost |
+| `PROBE_MS` / `AUDIT_MS` / `SILENT_RESTART_MS` / `SILENT_FAST_MS` / `LINK_DOWN_RESTART_MS` | 30 s / 10 s / 5 min / 2 min / 3 min | gateway ARP probe and chip register check intervals, then MCU restart when the gateway never replies or the link is lost |
 | `ASSET_VER` | `"9"` | cache-bust version; bump when main.css/main.js/det.js change |
 | `FOOTER_LOGO_URL` | ImgBB link | footer logo image |
 
@@ -271,23 +271,22 @@ hardware reset was the real 2015 fix). See
   registers were repeatedly scrambled while the MCU kept running; the firmware
   restarted itself each time. A separate 3.3 V regulator for the module is the likely
   fix. Details in [docs/resilience.md](docs/resilience.md#chip-state-corruption-2026-09-26-hardware-suspected).
-- A static-IP ENC28J60 takes no DHCP lease, so it will not appear in the router's
-  device list. Verify with `ping`, not the router UI.
+- A static-IP ENC28J60 takes no DHCP lease, so it might not appear in the router's
+  device list; some routers list it anyway from ARP traffic they have seen. `ping`
+  is the reliable check either way.
 
-## Alerting (Stage D, deferred)
+## Alerting (possible, not planned)
 
 The ENC28J60 cannot do TLS, so the Arduino cannot call Telegram (HTTPS only)
-directly. The planned design is a small poller on the Raspberry Pi (which already
-runs a Telegram bot) that fetches `/list.json` every few minutes and sends an alert
-when the temperature crosses a threshold, keeping the Arduino dumb and reusing
-working infrastructure. Open question before building it: whether the Pi
-(192.168.50.x) can route to the office Arduino (192.168.1.x), or whether a relay or
-office-side host is needed.
+directly. If this is ever wanted, a small poller on the Raspberry Pi that already
+serves the public page (see [pi/](pi/README.md)) could fetch `/list.json` and send
+an alert when the temperature crosses a threshold, keeping the Arduino dumb and
+reusing infrastructure that already exists. Not being built right now.
 
 ## Repository layout
 
 ```
-firmware/TempServerJQuery/TempServerJQuery.ino   the modernised sketch (office IP)
+firmware/TempServerJQuery/TempServerJQuery.ino   the modernised sketch (static IP)
 diagnostics/diag_01_blink/ ... diag_07_.../     bring-up and hardware diagnostic sketches
 original-2015/                                    the untouched 2015 sketches (reference)
 pi/                                               nginx cache and Cloudflare tunnel config for public access
