@@ -16,7 +16,7 @@ hardware reset), and adds resilience so it can run headless and unattended.
 |:---:|:---:|:---:|
 | <a href="docs/original-2015-build.jpg"><img src="docs/original-2015-build.jpg" width="300" alt="The original 2015 breadboard build"></a> | <a href="docs/enclosure-front.jpg"><img src="docs/enclosure-front.jpg" width="300" alt="The 2026 build in its 3D-printed enclosure, the DS18B20 probe on its cable in front"></a> | <a href="docs/web-ui-2026.png"><img src="docs/web-ui-2026.png" width="150" alt="The web UI at thermometer.bmroz.eu in Brave on Android"></a> |
 
-*Left: the original 2015 build, LCD reading -0.19 C at 21:14 on 26 Jan 2015. Middle: the 2026 build in its 3D-printed enclosure, the DS18B20 probe on its cable in front. Right: the public web UI at thermometer.bmroz.eu (Brave on Android) with a sensor's detail panel expanded. Click an image for the full size.*
+*Left: the original 2015 build, LCD reading -0.19 C at 21:14 on 26 Jan 2015. Middle: the 2026 build in its 3D-printed enclosure, the DS18B20 probe on its cable in front. Right: the public web UI at [thermometer.bmroz.eu](https://thermometer.bmroz.eu) (Brave on Android) with a sensor's detail panel expanded. Click an image for the full size.*
 
 ## History
 
