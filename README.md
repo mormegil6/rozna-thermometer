@@ -1,12 +1,12 @@
 [![Arduino](https://img.shields.io/badge/Arduino-Leonardo%20(ATmega32u4)-00979D.svg?logo=arduino&logoColor=white)]() [![EtherCard](https://img.shields.io/badge/EtherCard-ENC28J60-1F6FEB.svg)]() [![sensor](https://img.shields.io/badge/sensor-DS18B20-1F6FEB.svg)]() [![UI](https://img.shields.io/badge/UI-jQuery%20Mobile%201.2-1F6FEB.svg)]() [![clock](https://img.shields.io/badge/clock-NTP-1F6FEB.svg)]() [![status](https://img.shields.io/badge/status-working-007808.svg)]() [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-# arduino-thermometer - Rožna Arduino Thermometer
+# rozna-thermometer - Rožna Arduino Thermometer
 
 A networked temperature monitor first built in 2015 in a student dorm on Rožna
 dolina (Ljubljana), revived in 2026 for reliable, unattended temperature monitoring.
-An Arduino **Leonardo** reads a **DS18B20**, shows the temperature and an NTP clock on a 16x2
-LCD, and serves the original jQuery-Mobile web page plus a `/list.json` API over
-Ethernet (**ENC28J60**). Assembled by Bartłomiej Mróz.
+An Arduino **Leonardo** reads a **DS18B20** sensor, shows the temperature and an NTP
+clock on a 16x2 LCD, and serves the original jQuery-Mobile web page plus a
+`/list.json` API over Ethernet (**ENC28J60**).
 
 The 2015 code is kept as the reference; the revival modernises it for current
 toolchains, fixes the one thing that never worked back then (the ENC28J60 needed a
