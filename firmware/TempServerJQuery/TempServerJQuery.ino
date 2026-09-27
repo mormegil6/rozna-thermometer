@@ -80,8 +80,8 @@ static const byte NTP_SERVER_IP[] = { 216, 239, 35, 4 };
 #define AUDIT_MS        10000UL             // read the chip's key registers this often once the boot audit passed
 #define SILENT_RESTART_MS 300000UL          // link up and no gateway ARP reply this long: restart the MCU
 #define SILENT_FAST_MS  120000UL            // same, but once the chip has flagged a receive overflow (jam evidence)
-#define LINK_DOWN_RESTART_MS 600000UL       // link down this long after it was up: restart the MCU
-#define BACKOFF_MAX     4                   // consecutive restarts double the windows, up to 16x
+#define LINK_DOWN_RESTART_MS 180000UL       // link down this long after it was up: restart the MCU
+#define BACKOFF_MAX     2                   // consecutive restarts double the windows, up to 4x (was 16x: a bad night on 2026-09-26/27 showed a dead chip waiting up to 160 min for LINK_DOWN_RESTART_MS<<4)
 #define STREAK_CLEAR_MS 1800000UL           // this much healthy uptime forgets earlier restarts
 #define MIN_UPTIME_MS   60000UL             // minimum uptime before a NIC-fault restart
 #define WDT_MS          8000                // SleepyDog window (AVR max ~8s)
