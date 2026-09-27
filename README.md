@@ -27,7 +27,7 @@ OpenWrt with 802.1X on the WiFi, so we were the only ones online in there, which
 part of why a tiny ENC28J60 web server made sense at all. The 2026 revival runs on an
 ordinary LAN, wherever it is plugged in, so the board itself is LAN-only. The page is
 made public through a caching proxy and a Cloudflare tunnel on a Raspberry Pi instead
-of a router port forward (see *Public access*).
+of a router port forward (see [Public access](#public-access)).
 
 ## Status
 
@@ -46,7 +46,7 @@ Raspberry Pi).
 | NTP clock | working |
 | Watchdog and resilience | working |
 | Public page, https://thermometer.bmroz.eu | working (nginx cache and Cloudflare tunnel on a Pi, see `pi/`) |
-| Telegram alerting | deferred (Pi-side poller, see *Alerting*) |
+| Telegram alerting | deferred (Pi-side poller, see [Alerting](#alerting-possible-not-planned)) |
 
 ## Hardware and wiring
 
